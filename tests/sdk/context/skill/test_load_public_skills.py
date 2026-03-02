@@ -641,7 +641,7 @@ def test_load_marketplace_skill_names_returns_skill_names(mock_repo_with_marketp
     )
 
     assert skill_names is not None
-    assert skill_names == {"git", "docker"}
+    assert set(skill_names) == {"git", "docker"}
 
 
 def test_load_marketplace_skill_names_returns_none_when_file_missing(tmp_path):

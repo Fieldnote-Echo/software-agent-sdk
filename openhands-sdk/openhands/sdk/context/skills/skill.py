@@ -853,7 +853,7 @@ DEFAULT_MARKETPLACE_PATH = "marketplaces/default.json"
 
 def load_marketplace_skill_names(
     repo_path: Path, marketplace_path: str
-) -> set[str] | None:
+) -> list[str] | None:
     """Load the list of skill names from a marketplace manifest file.
 
     Uses the existing Marketplace model from openhands.sdk.plugin to parse
@@ -864,30 +864,7 @@ def load_marketplace_skill_names(
         marketplace_path: Relative path to the marketplace JSON file within the repo.
 
     Returns:
-        Set of skill names to load, or None if marketplace file not found or invalid.
-    """
-    result = load_marketplace_plugins(repo_path, marketplace_path)
-    if result is None:
-        return None
-    return {name for name, _ in result}
-
-
-def load_marketplace_plugins(
-    repo_path: Path, marketplace_path: str
-) -> list[tuple[str, str | None]] | None:
-    """Load plugin names and sources from a marketplace manifest file.
-
-    Uses the existing Marketplace model from openhands.sdk.plugin to parse
-    the marketplace JSON file and extract plugin information.
-
-    Args:
-        repo_path: Path to the local repository.
-        marketplace_path: Relative path to the marketplace JSON file within the repo.
-
-    Returns:
-        List of (skill_name, source) tuples where source is the plugin source string
-        (e.g., "./skill-name" or "owner/repo:skills/skill-name"), or None if
-        marketplace file not found or invalid.
+        List of skill names to load, or None if marketplace file not found or invalid.
     """
     from openhands.sdk.plugin import Marketplace
 
@@ -903,15 +880,13 @@ def load_marketplace_plugins(
         # Use Marketplace model for validation and parsing
         marketplace = Marketplace.model_validate({**data, "path": str(repo_path)})
 
-        plugins = []
-        for plugin in marketplace.plugins:
-            source = plugin.source if isinstance(plugin.source, str) else None
-            plugins.append((plugin.name, source))
+        skill_names = [plugin.name for plugin in marketplace.plugins]
 
         logger.debug(
-            f"Loaded {len(plugins)} plugins from marketplace: {marketplace_path}"
+            f"Loaded {len(skill_names)} skill names from marketplace: "
+            f"{marketplace_path}"
         )
-        return plugins
+        return skill_names
 
     except json.JSONDecodeError as e:
         logger.warning(f"Failed to parse marketplace JSON {marketplace_file}: {e}")
@@ -988,10 +963,9 @@ def load_public_skills(
         # Load the marketplace to determine which skills to include
         skill_names_to_load: list[str] | None = None
         if marketplace_path:
-            marketplace_plugins = load_marketplace_plugins(repo_path, marketplace_path)
-            if marketplace_plugins is not None:
-                # Extract skill names from marketplace (ignore source field)
-                skill_names_to_load = [name for name, _ in marketplace_plugins]
+            skill_names_to_load = load_marketplace_skill_names(
+                repo_path, marketplace_path
+            )
 
         # Find the skills directory
         skills_dir = repo_path / "skills"
