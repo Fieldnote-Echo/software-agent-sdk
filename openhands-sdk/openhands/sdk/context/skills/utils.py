@@ -343,7 +343,7 @@ def get_cache_name_from_url(repo_url: str) -> str:
         repo_url: Repository URL (e.g., 'https://github.com/owner/repo').
 
     Returns:
-        Cache directory name (e.g., 'owner-repo').
+        Cache directory name in lowercase (e.g., 'owner-repo').
     """
     # Remove protocol and trailing slashes
     url = repo_url.rstrip("/")
@@ -359,46 +359,8 @@ def get_cache_name_from_url(repo_url: str) -> str:
     # gitlab.com/owner/repo -> owner-repo
     parts = url.split("/")
     if len(parts) >= 2:
-        return f"{parts[-2]}-{parts[-1]}"
-    return parts[-1] if parts else "public-skills"
-
-
-def parse_marketplace_path(
-    marketplace_path: str,
-) -> tuple[str | None, str, str]:
-    """Parse a marketplace path into repo owner/name, branch, and file path.
-
-    Supports formats:
-    - "owner/repo:path/to/marketplace.json" - GitHub repo with path
-    - "owner/repo:path/to/marketplace.json@branch" - With specific branch
-    - "path/to/marketplace.json" - Default repo (OpenHands/extensions)
-
-    Args:
-        marketplace_path: Marketplace path in one of the supported formats.
-
-    Returns:
-        Tuple of (repo_spec, branch, file_path) where:
-        - repo_spec: "owner/repo" or None for default repo
-        - branch: Branch name (defaults to "main")
-        - file_path: Path to marketplace file within repo
-    """
-    # Default branch
-    branch = "main"
-
-    # Check for @branch suffix
-    if "@" in marketplace_path:
-        path_part, branch = marketplace_path.rsplit("@", 1)
-        marketplace_path = path_part
-
-    # Check for owner/repo:path format
-    if ":" in marketplace_path:
-        repo_spec, file_path = marketplace_path.split(":", 1)
-        # Validate it looks like owner/repo
-        if "/" in repo_spec and not repo_spec.startswith("/"):
-            return (repo_spec, branch, file_path)
-
-    # No repo spec - use default repo
-    return (None, branch, marketplace_path)
+        return f"{parts[-2]}-{parts[-1]}".lower()
+    return (parts[-1] if parts else "public-skills").lower()
 
 
 def discover_skill_resources(skill_dir: Path) -> SkillResources:

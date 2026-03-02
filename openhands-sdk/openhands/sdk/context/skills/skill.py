@@ -24,7 +24,6 @@ from openhands.sdk.context.skills.utils import (
     get_skills_cache_dir,
     load_and_categorize,
     load_mcp_config,
-    parse_marketplace_path,
     update_skills_repository,
     validate_skill_name,
 )
@@ -925,52 +924,21 @@ def load_marketplace_plugins(
         return None
 
 
-def parse_skill_source(source: str | None) -> tuple[str | None, str]:
-    """Parse a skill source string into repo spec and skill name.
-
-    Args:
-        source: Skill source string
-            (e.g., "./skill-name", "owner/repo:skills/skill-name").
-
-    Returns:
-        Tuple of (repo_spec, skill_name) where repo_spec is "owner/repo"
-        or None for local.
-    """
-    if source is None:
-        return (None, "")
-
-    # Handle cross-repo references: "owner/repo:skills/skill-name"
-    if ":" in source and "/" in source.split(":")[0]:
-        repo_spec, path = source.split(":", 1)
-        # Extract skill name from path (last component)
-        skill_name = path.rstrip("/").split("/")[-1]
-        return (repo_spec, skill_name)
-
-    # Local reference: "./skill-name" or "skill-name"
-    skill_name = source.lstrip("./").rstrip("/").split("/")[-1]
-    return (None, skill_name)
-
-
 def load_public_skills(
     repo_url: str = PUBLIC_SKILLS_REPO,
     branch: str = PUBLIC_SKILLS_BRANCH,
     marketplace_path: str | None = DEFAULT_MARKETPLACE_PATH,
 ) -> list[Skill]:
-    """Load skills from public skills repositories.
+    """Load skills from a public skills repository.
 
-    This function maintains local git clones of skills repositories. On first run,
-    it clones repositories to ~/.openhands/cache/skills/. On subsequent runs, it
-    pulls the latest changes to keep the skills up-to-date.
+    This function maintains a local git clone of the skills repository. On first run,
+    it clones the repository to ~/.openhands/cache/skills/. On subsequent runs, it
+    pulls the latest changes to keep skills up-to-date.
 
-    The marketplace_path parameter supports multiple formats:
-    - "marketplaces/default.json" - Load from default repo (OpenHands/extensions)
-    - "owner/repo:marketplaces/custom.json" - Load from specific GitHub repo
-    - "owner/repo:marketplaces/custom.json@branch" - Load from specific branch
-    - None - Load all skills from default repo without marketplace filtering
-
-    When a marketplace references skills from other repositories (cross-repo refs
-    like "OpenHands/extensions:skills/github"), those skills are automatically
-    loaded from the referenced repositories.
+    The marketplace_path parameter controls which skills are loaded:
+    - "marketplaces/default.json" - Load skills listed in default marketplace
+    - "marketplaces/custom.json" - Load skills from a custom marketplace file
+    - None - Load all skills from the repository without filtering
 
     Note: When a skill directory contains a SKILL.md file (AgentSkills format),
     any other markdown files in that directory or its subdirectories are treated
@@ -978,18 +946,14 @@ def load_public_skills(
 
     Args:
         repo_url: URL of the skills repository. Defaults to the official
-            OpenHands skills repository. This is used when marketplace_path
-            doesn't specify a repository.
+            OpenHands skills repository (OpenHands/extensions).
         branch: Branch name to load skills from. Defaults to 'main'.
-            This is used when marketplace_path doesn't specify a branch.
-        marketplace_path: Path to the marketplace JSON file. Supports formats:
-            - "path/to/marketplace.json" - Uses repo_url and branch params
-            - "owner/repo:path/to/marketplace.json" - Uses specified GitHub repo
-            - "owner/repo:path/to/marketplace.json@branch" - With specific branch
+        marketplace_path: Path to marketplace JSON file within the repository.
+            - "path/to/marketplace.json" - Load skills listed in marketplace
             - None - Load all skills without marketplace filtering
 
     Returns:
-        List of Skill objects loaded from the repositories.
+        List of Skill objects loaded from the repository.
         Returns empty list if loading fails.
 
     Example:
@@ -999,9 +963,9 @@ def load_public_skills(
         >>> # Load public skills from default marketplace
         >>> public_skills = load_public_skills()
         >>>
-        >>> # Load skills from a custom marketplace in a different repo
+        >>> # Load skills from a custom marketplace in same repo
         >>> custom_skills = load_public_skills(
-        ...     marketplace_path="neubig/workflow:marketplaces/default.json"
+        ...     marketplace_path="marketplaces/custom.json"
         ... )
         >>>
         >>> # Load all skills (no marketplace filtering)
@@ -1013,97 +977,37 @@ def load_public_skills(
     all_skills: list[Skill] = []
     cache_dir = get_skills_cache_dir()
 
-    # Parse marketplace_path to determine repo and file path
-    if marketplace_path:
-        parsed_repo, parsed_branch, file_path = parse_marketplace_path(marketplace_path)
-        if parsed_repo:
-            # marketplace_path specifies a different repo
-            repo_url = f"https://github.com/{parsed_repo}"
-            branch = parsed_branch
-            marketplace_path = file_path
-
     try:
-        # Get or update the primary repository (marketplace source)
-        primary_repo_path = update_skills_repository(repo_url, branch, cache_dir)
+        # Get or update the repository
+        repo_path = update_skills_repository(repo_url, branch, cache_dir)
 
-        if primary_repo_path is None:
+        if repo_path is None:
             logger.warning(f"Failed to access skills repository: {repo_url}")
             return all_skills
 
         # Load the marketplace to determine which skills to include
-        marketplace_plugins = None
+        skill_names_to_load: list[str] | None = None
         if marketplace_path:
-            marketplace_plugins = load_marketplace_plugins(
-                primary_repo_path, marketplace_path
-            )
+            marketplace_plugins = load_marketplace_plugins(repo_path, marketplace_path)
+            if marketplace_plugins is not None:
+                # Extract skill names from marketplace (ignore source field)
+                skill_names_to_load = [name for name, _ in marketplace_plugins]
 
-        # Group skills by repository for efficient loading
-        # Key: (repo_url, branch) or None for primary repo
-        # Value: list of skill names
-        skills_by_repo: dict[tuple[str, str] | None, list[str]] = {}
+        # Find the skills directory
+        skills_dir = repo_path / "skills"
+        if not skills_dir.exists():
+            logger.debug(f"Skills directory not found: {skills_dir}")
+            return all_skills
 
-        if marketplace_plugins is not None:
-            for skill_name, source in marketplace_plugins:
-                repo_spec, _ = parse_skill_source(source)
-                if repo_spec:
-                    # Cross-repo reference
-                    cross_repo_url = f"https://github.com/{repo_spec}"
-                    key = (cross_repo_url, "main")
-                else:
-                    # Local to primary repo
-                    key = None
-
-                if key not in skills_by_repo:
-                    skills_by_repo[key] = []
-                skills_by_repo[key].append(skill_name)
+        if skill_names_to_load is not None:
+            # Load specific skills from marketplace
+            for skill_name in skill_names_to_load:
+                skill = _load_skill_by_name(skills_dir, skill_name, repo_path)
+                if skill:
+                    all_skills.append(skill)
         else:
-            # No marketplace - load all from primary repo
-            skills_by_repo[None] = []  # Empty list means load all
-
-        # Load skills from each repository
-        loaded_skill_names: set[str] = set()
-
-        for repo_key, skill_names in skills_by_repo.items():
-            if repo_key is None:
-                # Primary repo
-                current_repo_path = primary_repo_path
-            else:
-                # Cross-repo reference - clone/update that repo
-                cross_repo_url, cross_branch = repo_key
-                current_repo_path = update_skills_repository(
-                    cross_repo_url, cross_branch, cache_dir
-                )
-                if current_repo_path is None:
-                    logger.warning(
-                        f"Failed to access cross-repo skills: {cross_repo_url}"
-                    )
-                    continue
-
-            # Load skills from this repo
-            skills_dir = current_repo_path / "skills"
-            if not skills_dir.exists():
-                logger.debug(f"Skills directory not found: {skills_dir}")
-                continue
-
-            if skill_names:
-                # Load specific skills
-                for skill_name in skill_names:
-                    if skill_name in loaded_skill_names:
-                        continue  # Already loaded from another repo
-
-                    skill = _load_skill_by_name(
-                        skills_dir, skill_name, current_repo_path
-                    )
-                    if skill:
-                        all_skills.append(skill)
-                        loaded_skill_names.add(skill.name)
-            else:
-                # Load all skills from this repo (no marketplace filtering)
-                skills = _load_all_skills_from_dir(skills_dir, current_repo_path)
-                for skill in skills:
-                    if skill.name not in loaded_skill_names:
-                        all_skills.append(skill)
-                        loaded_skill_names.add(skill.name)
+            # Load all skills from repository (no marketplace filtering)
+            all_skills = _load_all_skills_from_dir(skills_dir, repo_path)
 
         logger.info(f"Found {len(all_skills)} skill files in public skills repository")
 
