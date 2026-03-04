@@ -1065,6 +1065,63 @@ def _load_all_skills_from_dir(skills_dir: Path, repo_path: Path) -> list[Skill]:
     return skills
 
 
+def load_available_skills(
+    work_dir: str | Path | None = None,
+    *,
+    include_user: bool = False,
+    include_project: bool = False,
+    include_public: bool = False,
+    marketplace_path: str | None = DEFAULT_MARKETPLACE_PATH,
+) -> dict[str, Skill]:
+    """Load and merge skills from SDK-level sources with consistent precedence.
+
+    Precedence (later overrides earlier via dict updates):
+        public (lowest) → user → project (highest)
+
+    This is the single entry-point for building a merged skill catalog from
+    the three SDK-shipped sources. Server-only sources (sandbox, org) are
+    layered on top by the caller.
+
+    Args:
+        work_dir: Project/working directory for project skills. When None,
+            project skills are skipped regardless of *include_project*.
+        include_user: Load user-level skills (~/.agents/skills, etc.).
+        include_project: Load project-level skills (requires *work_dir*).
+        include_public: Load public skills from the OpenHands extensions repo.
+        marketplace_path: Path to marketplace JSON file for public skills filtering.
+            - "path/to/marketplace.json" - Load skills listed in marketplace
+            - None - Load all public skills without filtering
+
+    Returns:
+        Dict mapping skill name → Skill, with higher-precedence sources
+        overriding lower ones.
+    """
+    available: dict[str, Skill] = {}
+
+    if include_public:
+        try:
+            for s in load_public_skills(marketplace_path=marketplace_path):
+                available[s.name] = s
+        except Exception as e:
+            logger.warning(f"Failed to load public skills: {e}")
+
+    if include_user:
+        try:
+            for s in load_user_skills():
+                available[s.name] = s
+        except Exception as e:
+            logger.warning(f"Failed to load user skills: {e}")
+
+    if include_project and work_dir:
+        try:
+            for s in load_project_skills(work_dir):
+                available[s.name] = s
+        except Exception as e:
+            logger.warning(f"Failed to load project skills: {e}")
+
+    return available
+
+
 def to_prompt(skills: list[Skill], max_description_length: int = 200) -> str:
     """Generate XML prompt block for available skills.
 
