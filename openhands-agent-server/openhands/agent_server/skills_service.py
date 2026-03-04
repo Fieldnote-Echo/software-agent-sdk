@@ -21,12 +21,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from openhands.sdk.context.skills import (
+    DEFAULT_MARKETPLACE_URL,
     Skill,
     load_available_skills,
+    parse_marketplace_url,
 )
 from openhands.sdk.context.skills.skill import (
-    PUBLIC_SKILLS_BRANCH,
-    PUBLIC_SKILLS_REPO,
     load_skills_from_dir,
 )
 from openhands.sdk.context.skills.utils import (
@@ -284,7 +284,7 @@ def load_all_skills(
     org_repo_url: str | None = None,
     org_name: str | None = None,
     sandbox_exposed_urls: list[ExposedUrlData] | None = None,
-    marketplace_path: str | None = None,
+    marketplace_url: str | None = None,
 ) -> SkillLoadResult:
     """Load and merge skills from all configured sources.
 
@@ -305,16 +305,16 @@ def load_all_skills(
         org_repo_url: Pre-authenticated Git URL for org skills.
         org_name: Organization name for org skills.
         sandbox_exposed_urls: List of exposed URLs from sandbox.
-        marketplace_path: Path to the marketplace JSON file within the public
-            skills repository. If None, uses SDK default ('marketplaces/default.json').
+        marketplace_url: Raw GitHub URL to the marketplace JSON file.
+            If None, uses SDK default.
 
     Returns:
         SkillLoadResult containing merged skills and source counts.
     """
-    from openhands.sdk.context.skills import DEFAULT_MARKETPLACE_PATH
+    from openhands.sdk.context.skills import DEFAULT_MARKETPLACE_URL
 
-    if marketplace_path is None:
-        marketplace_path = DEFAULT_MARKETPLACE_PATH
+    if marketplace_url is None:
+        marketplace_url = DEFAULT_MARKETPLACE_URL
 
     sources: dict[str, int] = {}
     skill_lists: list[list[Skill]] = []
@@ -334,7 +334,7 @@ def load_all_skills(
         include_user=load_user,
         include_project=False,
         include_public=load_public,
-        marketplace_path=marketplace_path,
+        marketplace_url=marketplace_url,
     )
     sources["sdk_base"] = len(sdk_base)
     skill_lists.append(list(sdk_base.values()))
@@ -373,25 +373,33 @@ def load_all_skills(
     return SkillLoadResult(skills=all_skills, sources=sources)
 
 
-def sync_public_skills() -> tuple[bool, str]:
+def sync_public_skills(
+    marketplace_url: str = DEFAULT_MARKETPLACE_URL,
+) -> tuple[bool, str]:
     """Force refresh of public skills from GitHub repository.
 
     This triggers a git pull on the cached skills repository to get
-    the latest skills from the OpenHands/extensions repository.
+    the latest skills from the specified marketplace's repository.
+
+    Args:
+        marketplace_url: Raw GitHub URL to the marketplace JSON file.
+            Defaults to the official OpenHands extensions marketplace.
 
     Returns:
         Tuple of (success: bool, message: str).
     """
     try:
+        repo_url, branch, _ = parse_marketplace_url(marketplace_url)
         cache_dir = get_skills_cache_dir()
-        result = update_skills_repository(
-            PUBLIC_SKILLS_REPO, PUBLIC_SKILLS_BRANCH, cache_dir
-        )
+        result = update_skills_repository(repo_url, branch, cache_dir)
 
         if result:
             return (True, "Skills repository synced successfully")
         else:
             return (False, "Failed to sync skills repository")
+    except ValueError as e:
+        logger.warning(f"Invalid marketplace URL: {e}")
+        return (False, str(e))
     except Exception as e:
         logger.warning(f"Failed to sync skills repository: {e}")
         return (False, f"Sync failed: {str(e)}")

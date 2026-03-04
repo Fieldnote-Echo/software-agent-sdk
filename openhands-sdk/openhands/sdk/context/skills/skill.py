@@ -845,17 +845,62 @@ def load_project_skills(work_dir: str | Path) -> list[Skill]:
     return all_skills
 
 
-# Public skills repository configuration
-PUBLIC_SKILLS_REPO = "https://github.com/OpenHands/extensions"
-PUBLIC_SKILLS_BRANCH = "main"
-DEFAULT_MARKETPLACE_PATH = "marketplaces/default.json"
+# Default marketplace URL (raw GitHub format)
+DEFAULT_MARKETPLACE_URL = (
+    "https://raw.githubusercontent.com"
+    "/OpenHands/extensions/main/marketplaces/default.json"
+)
 
 
-def load_public_skills(
-    repo_url: str = PUBLIC_SKILLS_REPO,
-    branch: str = PUBLIC_SKILLS_BRANCH,
-    marketplace_path: str = DEFAULT_MARKETPLACE_PATH,
-) -> list[Skill]:
+def parse_marketplace_url(url: str) -> tuple[str, str, str]:
+    """Parse a raw GitHub marketplace URL into repo, branch, and path components.
+
+    Supports raw.githubusercontent.com URLs:
+        https://raw.githubusercontent.com/<owner>/<repo>/<branch>/<path>
+
+    Examples:
+        >>> parse_marketplace_url(
+        ...     "https://raw.githubusercontent.com/OpenHands/extensions/main/m.json"
+        ... )
+        ('https://github.com/OpenHands/extensions', 'main', 'm.json')
+
+    Args:
+        url: Raw GitHub URL to the marketplace JSON file.
+
+    Returns:
+        Tuple of (repo_url, branch, marketplace_path)
+
+    Raises:
+        ValueError: If the URL format is invalid.
+    """
+    prefix = "https://raw.githubusercontent.com/"
+    if not url.startswith(prefix):
+        raise ValueError(
+            f"Invalid marketplace URL: {url}. "
+            f"Expected format: {prefix}<owner>/<repo>/<branch>/<path>"
+        )
+
+    # Parse: owner/repo/branch/path/to/file.json
+    path_part = url[len(prefix) :]
+    parts = path_part.split("/")
+
+    if len(parts) < 4:
+        raise ValueError(
+            f"Invalid marketplace URL: {url}. "
+            f"Expected format: {prefix}<owner>/<repo>/<branch>/<path>"
+        )
+
+    owner = parts[0]
+    repo = parts[1]
+    branch = parts[2]
+    marketplace_path = "/".join(parts[3:])
+
+    repo_url = f"https://github.com/{owner}/{repo}"
+
+    return repo_url, branch, marketplace_path
+
+
+def load_public_skills(marketplace_url: str = DEFAULT_MARKETPLACE_URL) -> list[Skill]:
     """Load skills from a public skills repository.
 
     This function maintains a local git clone of the skills repository. On first run,
@@ -865,34 +910,40 @@ def load_public_skills(
     Only skills listed in the marketplace JSON file are loaded.
 
     Args:
-        repo_url: URL of the skills repository. Defaults to the official
-            OpenHands skills repository (OpenHands/extensions).
-        branch: Branch name to load skills from. Defaults to 'main'.
-        marketplace_path: Path to marketplace JSON file within the repository.
-            Defaults to 'marketplaces/default.json'.
+        marketplace_url: Raw GitHub URL to the marketplace JSON file.
+            Format: https://raw.githubusercontent.com/<owner>/<repo>/<branch>/<path>
+            Defaults to the official OpenHands extensions marketplace.
 
     Returns:
         List of Skill objects loaded from the repository.
         Returns empty list if loading fails.
 
     Example:
-        >>> from openhands.sdk.context import AgentContext
         >>> from openhands.sdk.context.skills import load_public_skills
         >>>
-        >>> # Load public skills from default marketplace
-        >>> public_skills = load_public_skills()
+        >>> # Load from default marketplace
+        >>> skills = load_public_skills()
         >>>
-        >>> # Load skills from a custom marketplace
-        >>> custom_skills = load_public_skills(
-        ...     marketplace_path="marketplaces/custom.json"
+        >>> # Load from custom marketplace
+        >>> skills = load_public_skills(
+        ...     "https://raw.githubusercontent.com/myorg/skills/main/marketplaces/custom.json"
         ... )
         >>>
-        >>> # Use with AgentContext
-        >>> context = AgentContext(skills=public_skills)
+        >>> # Load from specific branch
+        >>> skills = load_public_skills(
+        ...     "https://raw.githubusercontent.com/OpenHands/extensions/develop/marketplaces/beta.json"
+        ... )
     """
     from openhands.sdk.plugin import Marketplace
 
     all_skills: list[Skill] = []
+
+    try:
+        repo_url, branch, marketplace_path = parse_marketplace_url(marketplace_url)
+    except ValueError as e:
+        logger.warning(str(e))
+        return all_skills
+
     cache_dir = get_skills_cache_dir()
 
     try:
@@ -984,7 +1035,7 @@ def load_available_skills(
     include_user: bool = False,
     include_project: bool = False,
     include_public: bool = False,
-    marketplace_path: str = DEFAULT_MARKETPLACE_PATH,
+    marketplace_url: str = DEFAULT_MARKETPLACE_URL,
 ) -> dict[str, Skill]:
     """Load and merge skills from SDK-level sources with consistent precedence.
 
@@ -1001,8 +1052,8 @@ def load_available_skills(
         include_user: Load user-level skills (~/.agents/skills, etc.).
         include_project: Load project-level skills (requires *work_dir*).
         include_public: Load public skills from the OpenHands extensions repo.
-        marketplace_path: Path to marketplace JSON file for public skills.
-            Defaults to 'marketplaces/default.json'.
+        marketplace_url: URL specifying the repository and marketplace file.
+            Format: <repo_url>[@<branch>]:<marketplace_path>
 
     Returns:
         Dict mapping skill name → Skill, with higher-precedence sources
@@ -1012,7 +1063,7 @@ def load_available_skills(
 
     if include_public:
         try:
-            for s in load_public_skills(marketplace_path=marketplace_path):
+            for s in load_public_skills(marketplace_url):
                 available[s.name] = s
         except Exception as e:
             logger.warning(f"Failed to load public skills: {e}")

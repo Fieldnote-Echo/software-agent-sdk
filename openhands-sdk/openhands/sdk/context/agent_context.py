@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from openhands.sdk.context.prompts import render_template
 from openhands.sdk.context.skills import (
-    DEFAULT_MARKETPLACE_PATH,
+    DEFAULT_MARKETPLACE_URL,
     Skill,
     SkillKnowledge,
     load_available_skills,
@@ -72,12 +72,11 @@ class AgentContext(BaseModel):
             "This allows you to get the latest skills without SDK updates."
         ),
     )
-    marketplace_path: str = Field(
-        default=DEFAULT_MARKETPLACE_PATH,
+    marketplace_url: str = Field(
+        default=DEFAULT_MARKETPLACE_URL,
         description=(
-            "Path to the marketplace JSON file within the public skills repository. "
-            "The marketplace defines which skills are loaded. "
-            "Defaults to 'marketplaces/default.json'."
+            "Raw GitHub URL to the marketplace JSON file. "
+            "Format: https://raw.githubusercontent.com/<owner>/<repo>/<branch>/<path>"
         ),
     )
     secrets: Mapping[str, SecretValue] | None = Field(
@@ -124,7 +123,7 @@ class AgentContext(BaseModel):
             include_user=self.load_user_skills,
             include_project=False,
             include_public=self.load_public_skills,
-            marketplace_path=self.marketplace_path,
+            marketplace_url=self.marketplace_url,
         )
 
         existing_names = {skill.name for skill in self.skills}
