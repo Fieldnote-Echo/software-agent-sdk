@@ -851,54 +851,6 @@ PUBLIC_SKILLS_BRANCH = "main"
 DEFAULT_MARKETPLACE_PATH = "marketplaces/default.json"
 
 
-def load_marketplace_skill_names(
-    repo_path: Path, marketplace_path: str
-) -> list[str] | None:
-    """Load the list of skill names from a marketplace manifest file.
-
-    Uses the existing Marketplace model from openhands.sdk.plugin to parse
-    the marketplace JSON file and extract plugin names.
-
-    Args:
-        repo_path: Path to the local repository.
-        marketplace_path: Relative path to the marketplace JSON file within the repo.
-
-    Returns:
-        List of skill names to load, or None if marketplace file not found or invalid.
-    """
-    from openhands.sdk.plugin import Marketplace
-
-    marketplace_file = repo_path / marketplace_path
-    if not marketplace_file.exists():
-        logger.debug(f"Marketplace file not found: {marketplace_file}")
-        return None
-
-    try:
-        with open(marketplace_file) as f:
-            data = json.load(f)
-
-        # Use Marketplace model for validation and parsing
-        marketplace = Marketplace.model_validate({**data, "path": str(repo_path)})
-
-        skill_names = [plugin.name for plugin in marketplace.plugins]
-
-        logger.debug(
-            f"Loaded {len(skill_names)} skill names from marketplace: "
-            f"{marketplace_path}"
-        )
-        return skill_names
-
-    except json.JSONDecodeError as e:
-        logger.warning(f"Failed to parse marketplace JSON {marketplace_file}: {e}")
-        return None
-    except OSError as e:
-        logger.warning(f"Failed to read marketplace file {marketplace_file}: {e}")
-        return None
-    except Exception as e:
-        logger.warning(f"Failed to load marketplace {marketplace_file}: {e}")
-        return None
-
-
 def load_public_skills(
     repo_url: str = PUBLIC_SKILLS_REPO,
     branch: str = PUBLIC_SKILLS_BRANCH,
@@ -949,6 +901,8 @@ def load_public_skills(
         >>> # Use with AgentContext
         >>> context = AgentContext(skills=public_skills)
     """
+    from openhands.sdk.plugin import Marketplace
+
     all_skills: list[Skill] = []
     cache_dir = get_skills_cache_dir()
 
@@ -960,27 +914,38 @@ def load_public_skills(
             logger.warning(f"Failed to access skills repository: {repo_url}")
             return all_skills
 
-        # Load the marketplace to determine which skills to include
-        skill_names_to_load: list[str] | None = None
-        if marketplace_path:
-            skill_names_to_load = load_marketplace_skill_names(
-                repo_path, marketplace_path
-            )
-
         # Find the skills directory
         skills_dir = repo_path / "skills"
         if not skills_dir.exists():
             logger.debug(f"Skills directory not found: {skills_dir}")
             return all_skills
 
-        if skill_names_to_load is not None:
-            # Load specific skills from marketplace
-            for skill_name in skill_names_to_load:
-                skill = _load_skill_by_name(skills_dir, skill_name, repo_path)
-                if skill:
-                    all_skills.append(skill)
+        # Load skills based on marketplace or all skills
+        if marketplace_path:
+            marketplace_file = repo_path / marketplace_path
+            if marketplace_file.exists():
+                try:
+                    with open(marketplace_file) as f:
+                        data = json.load(f)
+                    marketplace = Marketplace.model_validate(
+                        {**data, "path": str(repo_path)}
+                    )
+                    for plugin in marketplace.plugins:
+                        skill = _load_skill_by_name(skills_dir, plugin.name, repo_path)
+                        if skill:
+                            all_skills.append(skill)
+                except (json.JSONDecodeError, OSError) as e:
+                    logger.warning(
+                        f"Failed to load marketplace {marketplace_file}: {e}"
+                    )
+                    # Fall back to loading all skills
+                    all_skills = _load_all_skills_from_dir(skills_dir, repo_path)
+            else:
+                # No marketplace file found, load all skills
+                logger.debug(f"Marketplace file not found: {marketplace_file}")
+                all_skills = _load_all_skills_from_dir(skills_dir, repo_path)
         else:
-            # Load all skills from repository (no marketplace filtering)
+            # No marketplace filtering requested, load all skills
             all_skills = _load_all_skills_from_dir(skills_dir, repo_path)
 
         logger.info(f"Found {len(all_skills)} skill files in public skills repository")
