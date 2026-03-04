@@ -284,7 +284,7 @@ def load_all_skills(
     org_repo_url: str | None = None,
     org_name: str | None = None,
     sandbox_exposed_urls: list[ExposedUrlData] | None = None,
-    marketplace_path: str = "marketplaces/default.json",
+    marketplace_path: str | None = None,
 ) -> SkillLoadResult:
     """Load and merge skills from all configured sources.
 
@@ -306,11 +306,16 @@ def load_all_skills(
         org_name: Organization name for org skills.
         sandbox_exposed_urls: List of exposed URLs from sandbox.
         marketplace_path: Path to the marketplace JSON file within the public
-            skills repository. Defaults to 'marketplaces/default.json'.
+            skills repository. If None, uses SDK default ('marketplaces/default.json').
 
     Returns:
         SkillLoadResult containing merged skills and source counts.
     """
+    from openhands.sdk.context.skills import DEFAULT_MARKETPLACE_PATH
+
+    if marketplace_path is None:
+        marketplace_path = DEFAULT_MARKETPLACE_PATH
+
     sources: dict[str, int] = {}
     skill_lists: list[list[Skill]] = []
 
