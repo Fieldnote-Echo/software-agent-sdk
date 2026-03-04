@@ -739,7 +739,48 @@ def test_load_public_skills_from_local_path(tmp_path):
     marketplace_file = marketplaces_dir / "default.json"
     marketplace_file.write_text(json.dumps(marketplace))
 
-    # Load from local marketplace file
+    # Load from local marketplace file (absolute path)
     skills = load_public_skills(str(marketplace_file))
+    skill_names = {s.name for s in skills}
+    assert skill_names == {"git", "docker"}
+
+
+def test_load_public_skills_from_relative_path(tmp_path, monkeypatch):
+    """Test loading skills from a relative marketplace path."""
+    repo_dir = tmp_path / "local_skills"
+    repo_dir.mkdir()
+    skills_dir = repo_dir / "skills"
+    skills_dir.mkdir()
+
+    # Create skills
+    for name in ["git", "docker"]:
+        skill_dir = skills_dir / name
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {name}\n---\n{name} content."
+        )
+
+    # Create marketplace
+    marketplaces_dir = repo_dir / "marketplaces"
+    marketplaces_dir.mkdir()
+    marketplace = {
+        "name": "default",
+        "owner": {"name": "Test", "email": "test@test.com"},
+        "plugins": [
+            {"name": "git", "source": "./git"},
+            {"name": "docker", "source": "./docker"},
+        ],
+    }
+    marketplace_file = marketplaces_dir / "default.json"
+    marketplace_file.write_text(json.dumps(marketplace))
+
+    # Change to the repo directory and use relative path
+    monkeypatch.chdir(repo_dir)
+    skills = load_public_skills("marketplaces/default.json")
+    skill_names = {s.name for s in skills}
+    assert skill_names == {"git", "docker"}
+
+    # Also test with ./ prefix
+    skills = load_public_skills("./marketplaces/default.json")
     skill_names = {s.name for s in skills}
     assert skill_names == {"git", "docker"}

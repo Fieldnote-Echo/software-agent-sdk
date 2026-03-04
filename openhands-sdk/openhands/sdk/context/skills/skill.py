@@ -857,6 +857,7 @@ def load_public_skills(marketplace: str = DEFAULT_MARKETPLACE) -> list[Skill]:
 
     Args:
         marketplace: URL or local path to a marketplace.json file.
+            Can be absolute, relative, or a URL.
 
     Returns:
         List of Skill objects.
@@ -867,12 +868,26 @@ def load_public_skills(marketplace: str = DEFAULT_MARKETPLACE) -> list[Skill]:
 
     # Load the JSON
     try:
-        if marketplace.startswith(("/", "file://")):
-            path = marketplace[7:] if marketplace.startswith("file://") else marketplace
-            with open(path) as f:
-                data = json.load(f)
-            base_dir = Path(path).parent.parent  # up from marketplaces/
+        # Check if it's a local path (absolute, relative, or file://)
+        if marketplace.startswith("file://"):
+            local_path = Path(marketplace[7:])
+        elif marketplace.startswith(("http://", "https://")):
+            local_path = None
         else:
+            # Could be absolute or relative path
+            local_path = Path(marketplace)
+
+        if local_path is not None:
+            # Resolve relative paths
+            local_path = local_path.resolve()
+            if not local_path.exists():
+                logger.warning(f"Marketplace file not found: {local_path}")
+                return all_skills
+            with open(local_path) as f:
+                data = json.load(f)
+            base_dir = local_path.parent.parent  # up from marketplaces/
+        else:
+            # Remote URL
             import urllib.request
 
             with urllib.request.urlopen(marketplace, timeout=30) as resp:
