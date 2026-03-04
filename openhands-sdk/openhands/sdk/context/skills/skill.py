@@ -845,19 +845,39 @@ def load_project_skills(work_dir: str | Path) -> list[Skill]:
     return all_skills
 
 
-# Default marketplace file
+# Default marketplace
 DEFAULT_MARKETPLACE = (
     "https://raw.githubusercontent.com"
     "/OpenHands/extensions/main/marketplaces/default.json"
 )
 
 
+def _parse_raw_github_url(url: str) -> tuple[str, str, str] | None:
+    """Parse a raw.githubusercontent.com URL into repo, branch, path.
+
+    Returns (repo_url, branch, path) or None if not a raw GitHub URL.
+    """
+    prefix = "https://raw.githubusercontent.com/"
+    if not url.startswith(prefix):
+        return None
+
+    parts = url[len(prefix) :].split("/")
+    if len(parts) < 4:
+        return None
+
+    owner, repo, branch = parts[0], parts[1], parts[2]
+    path = "/".join(parts[3:])
+    return f"https://github.com/{owner}/{repo}", branch, path
+
+
 def load_public_skills(marketplace: str = DEFAULT_MARKETPLACE) -> list[Skill]:
-    """Load skills from a marketplace JSON file.
+    """Load skills from a marketplace.
 
     Args:
         marketplace: URL or local path to a marketplace.json file.
-            Can be absolute, relative, or a URL.
+            - Local path: "/path/to/repo/marketplaces/default.json"
+            - Relative path: "./marketplaces/default.json"
+            - Raw GitHub URL: "https://raw.githubusercontent.com/.../marketplace.json"
 
     Returns:
         List of Skill objects.
@@ -866,38 +886,62 @@ def load_public_skills(marketplace: str = DEFAULT_MARKETPLACE) -> list[Skill]:
 
     all_skills: list[Skill] = []
 
-    # Load the JSON
-    try:
-        # Check if it's a local path (absolute, relative, or file://)
-        if marketplace.startswith("file://"):
-            local_path = Path(marketplace[7:])
-        elif marketplace.startswith(("http://", "https://")):
-            local_path = None
-        else:
-            # Could be absolute or relative path
-            local_path = Path(marketplace)
+    # Determine if local or remote
+    if marketplace.startswith("file://"):
+        local_path = Path(marketplace[7:]).resolve()
+    elif marketplace.startswith(("http://", "https://")):
+        local_path = None
+    else:
+        # Absolute or relative path
+        local_path = Path(marketplace).resolve()
 
-        if local_path is not None:
-            # Resolve relative paths
-            local_path = local_path.resolve()
-            if not local_path.exists():
-                logger.warning(f"Marketplace file not found: {local_path}")
-                return all_skills
+    # Load marketplace and determine base_dir for skills
+    if local_path is not None:
+        # Local file
+        if not local_path.exists():
+            logger.warning(f"Marketplace file not found: {local_path}")
+            return all_skills
+        try:
             with open(local_path) as f:
                 data = json.load(f)
-            base_dir = local_path.parent.parent  # up from marketplaces/
+        except Exception as e:
+            logger.warning(f"Failed to load marketplace {local_path}: {e}")
+            return all_skills
+        base_dir = local_path.parent.parent  # up from marketplaces/
+    else:
+        # Remote URL - check if raw GitHub URL, then clone the repo
+        parsed = _parse_raw_github_url(marketplace)
+        if parsed:
+            repo_url, branch, marketplace_path = parsed
+            cache_dir = get_skills_cache_dir()
+            repo_path = update_skills_repository(repo_url, branch, cache_dir)
+            if not repo_path:
+                logger.warning(f"Failed to clone repo: {repo_url}")
+                return all_skills
+            marketplace_file = repo_path / marketplace_path
+            if not marketplace_file.exists():
+                logger.warning(f"Marketplace file not found: {marketplace_file}")
+                return all_skills
+            try:
+                with open(marketplace_file) as f:
+                    data = json.load(f)
+            except Exception as e:
+                logger.warning(f"Failed to load marketplace {marketplace_file}: {e}")
+                return all_skills
+            base_dir = repo_path
         else:
-            # Remote URL
-            import urllib.request
+            # Other URL - just fetch the JSON (skills must be remote too)
+            try:
+                import urllib.request
 
-            with urllib.request.urlopen(marketplace, timeout=30) as resp:
-                data = json.load(resp)
+                with urllib.request.urlopen(marketplace, timeout=30) as resp:
+                    data = json.load(resp)
+            except Exception as e:
+                logger.warning(f"Failed to load marketplace {marketplace}: {e}")
+                return all_skills
             base_dir = None
-    except Exception as e:
-        logger.warning(f"Failed to load marketplace {marketplace}: {e}")
-        return all_skills
 
-    # Parse and load skills
+    # Parse marketplace
     try:
         mp = Marketplace.model_validate({**data, "path": str(base_dir or "")})
     except Exception as e:
