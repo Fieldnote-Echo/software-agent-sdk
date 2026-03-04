@@ -376,20 +376,30 @@ def load_all_skills(
 def sync_public_skills(
     marketplace_url: str = DEFAULT_MARKETPLACE_URL,
 ) -> tuple[bool, str]:
-    """Force refresh of public skills from GitHub repository.
+    """Force refresh of public skills from a git repository.
 
     This triggers a git pull on the cached skills repository to get
     the latest skills from the specified marketplace's repository.
 
     Args:
-        marketplace_url: Raw GitHub URL to the marketplace JSON file.
+        marketplace_url: URL or local path to the skills repository.
+            Format: <url_or_path>[@branch][:marketplace_path]
             Defaults to the official OpenHands extensions marketplace.
 
     Returns:
         Tuple of (success: bool, message: str).
     """
     try:
-        repo_url, branch, _ = parse_marketplace_url(marketplace_url)
+        repo_url_or_none, branch_or_local_path, _ = parse_marketplace_url(
+            marketplace_url
+        )
+
+        # Local paths don't need syncing
+        if repo_url_or_none is None:
+            return (True, "Local path - no sync needed")
+
+        repo_url = repo_url_or_none
+        branch = branch_or_local_path
         cache_dir = get_skills_cache_dir()
         result = update_skills_repository(repo_url, branch, cache_dir)
 
@@ -397,9 +407,6 @@ def sync_public_skills(
             return (True, "Skills repository synced successfully")
         else:
             return (False, "Failed to sync skills repository")
-    except ValueError as e:
-        logger.warning(f"Invalid marketplace URL: {e}")
-        return (False, str(e))
     except Exception as e:
         logger.warning(f"Failed to sync skills repository: {e}")
         return (False, f"Sync failed: {str(e)}")

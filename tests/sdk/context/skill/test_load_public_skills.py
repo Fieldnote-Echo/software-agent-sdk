@@ -513,11 +513,8 @@ def test_load_public_skills_custom_repo(mock_repo_dir, tmp_path):
             return_value=tmp_path,
         ),
     ):
-        # Custom repo specified via raw GitHub URL
-        custom_url = (
-            "https://raw.githubusercontent.com"
-            "/custom-org/custom-skills/main/marketplaces/default.json"
-        )
+        # Custom repo - uses default branch and marketplace path
+        custom_url = "https://github.com/custom-org/custom-skills"
         skills = load_public_skills(custom_url)
         assert len(skills) == 3
 
@@ -539,11 +536,8 @@ def test_load_public_skills_custom_branch(mock_repo_dir, tmp_path):
             return_value=tmp_path,
         ),
     ):
-        # Branch specified via raw GitHub URL
-        develop_url = (
-            "https://raw.githubusercontent.com"
-            "/OpenHands/extensions/develop/marketplaces/default.json"
-        )
+        # Branch specified via @branch suffix
+        develop_url = "https://github.com/OpenHands/extensions@develop"
         skills = load_public_skills(develop_url)
         assert len(skills) == 3
 
@@ -802,30 +796,58 @@ def test_load_public_skills_handles_legacy_md_files_with_marketplace(tmp_path):
 
 
 def test_parse_marketplace_url():
-    """Test parsing raw GitHub URLs into components."""
-    # Standard URL
+    """Test parsing marketplace URLs into components."""
+    # Simple GitHub URL (uses defaults)
     repo_url, branch, path = parse_marketplace_url(
-        "https://raw.githubusercontent.com/OpenHands/extensions/main/marketplaces/default.json"
+        "https://github.com/OpenHands/extensions"
     )
     assert repo_url == "https://github.com/OpenHands/extensions"
     assert branch == "main"
     assert path == "marketplaces/default.json"
 
-    # Different branch
+    # GitHub URL with branch
     repo_url, branch, path = parse_marketplace_url(
-        "https://raw.githubusercontent.com/user/repo/develop/custom/path.json"
+        "https://github.com/user/repo@develop"
     )
     assert repo_url == "https://github.com/user/repo"
     assert branch == "develop"
-    assert path == "custom/path.json"
+    assert path == "marketplaces/default.json"
 
-    # Invalid URL (wrong prefix)
-    with pytest.raises(ValueError, match="Invalid marketplace URL"):
-        parse_marketplace_url("https://github.com/user/repo/main/file.json")
+    # GitHub URL with branch and path
+    repo_url, branch, path = parse_marketplace_url(
+        "https://github.com/user/repo@develop:custom/marketplace.json"
+    )
+    assert repo_url == "https://github.com/user/repo"
+    assert branch == "develop"
+    assert path == "custom/marketplace.json"
 
-    # Invalid URL (too few parts)
-    with pytest.raises(ValueError, match="Invalid marketplace URL"):
-        parse_marketplace_url("https://raw.githubusercontent.com/user/repo")
+    # GitLab URL
+    repo_url, branch, path = parse_marketplace_url(
+        "https://gitlab.com/org/skills@main:marketplaces/default.json"
+    )
+    assert repo_url == "https://gitlab.com/org/skills"
+    assert branch == "main"
+    assert path == "marketplaces/default.json"
+
+    # Local path (returns None for repo_url)
+    repo_url, local_path, path = parse_marketplace_url("/workspace/my-skills")
+    assert repo_url is None
+    assert local_path == "/workspace/my-skills"
+    assert path == "marketplaces/default.json"
+
+    # Local path with custom marketplace
+    repo_url, local_path, path = parse_marketplace_url(
+        "/workspace/my-skills:custom/marketplace.json"
+    )
+    assert repo_url is None
+    assert local_path == "/workspace/my-skills"
+    assert path == "custom/marketplace.json"
+
+    # file:// URL
+    repo_url, local_path, path = parse_marketplace_url("file:///workspace/skills")
+    assert repo_url is None
+    assert local_path == "/workspace/skills"
+    assert path == "marketplaces/default.json"
 
 
 def test_load_public_skills_with_custom_marketplace_url(tmp_path):
@@ -887,19 +909,47 @@ def test_load_public_skills_with_custom_marketplace_url(tmp_path):
         ),
     ):
         # Default marketplace should only have git and docker
-        default_url = (
-            "https://raw.githubusercontent.com"
-            "/OpenHands/extensions/main/marketplaces/default.json"
-        )
+        default_url = "https://github.com/OpenHands/extensions"
         skills_default = load_public_skills(default_url)
         skill_names_default = {s.name for s in skills_default}
         assert skill_names_default == {"git", "docker"}
 
         # Custom marketplace should have all skills
-        custom_url = (
-            "https://raw.githubusercontent.com"
-            "/OpenHands/extensions/main/marketplaces/custom.json"
-        )
+        custom_url = "https://github.com/OpenHands/extensions:marketplaces/custom.json"
         skills_custom = load_public_skills(custom_url)
         skill_names_custom = {s.name for s in skills_custom}
         assert skill_names_custom == {"git", "docker", "internal-only", "experimental"}
+
+
+def test_load_public_skills_from_local_path(tmp_path):
+    """Test loading skills from a local path."""
+    repo_dir = tmp_path / "local_skills"
+    repo_dir.mkdir()
+    skills_dir = repo_dir / "skills"
+    skills_dir.mkdir()
+
+    # Create skills
+    for name in ["git", "docker"]:
+        skill_dir = skills_dir / name
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {name}\n---\n{name} content."
+        )
+
+    # Create marketplace
+    marketplaces_dir = repo_dir / "marketplaces"
+    marketplaces_dir.mkdir()
+    marketplace = {
+        "name": "default",
+        "owner": {"name": "Test", "email": "test@test.com"},
+        "plugins": [
+            {"name": "git", "source": "./git"},
+            {"name": "docker", "source": "./docker"},
+        ],
+    }
+    (marketplaces_dir / "default.json").write_text(json.dumps(marketplace))
+
+    # Load from local path - no mocking needed!
+    skills = load_public_skills(str(repo_dir))
+    skill_names = {s.name for s in skills}
+    assert skill_names == {"git", "docker"}

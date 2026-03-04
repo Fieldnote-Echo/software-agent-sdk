@@ -845,74 +845,103 @@ def load_project_skills(work_dir: str | Path) -> list[Skill]:
     return all_skills
 
 
-# Default marketplace URL (raw GitHub format)
-DEFAULT_MARKETPLACE_URL = (
-    "https://raw.githubusercontent.com"
-    "/OpenHands/extensions/main/marketplaces/default.json"
-)
+# Default marketplace URL
+DEFAULT_MARKETPLACE_URL = "https://github.com/OpenHands/extensions"
+DEFAULT_MARKETPLACE_PATH = "marketplaces/default.json"
+DEFAULT_BRANCH = "main"
 
 
-def parse_marketplace_url(url: str) -> tuple[str, str, str]:
-    """Parse a raw GitHub marketplace URL into repo, branch, and path components.
+def parse_marketplace_url(url: str) -> tuple[str | None, str, str]:
+    """Parse a marketplace URL into source, branch, and path components.
 
-    Supports raw.githubusercontent.com URLs:
-        https://raw.githubusercontent.com/<owner>/<repo>/<branch>/<path>
+    Supports:
+        - Local paths: /path/to/repo or /path/to/repo:marketplace.json
+        - Git URLs: https://github.com/owner/repo[@branch][:path]
+
+    Format: <url_or_path>[@branch][:marketplace_path]
 
     Examples:
-        >>> parse_marketplace_url(
-        ...     "https://raw.githubusercontent.com/OpenHands/extensions/main/m.json"
-        ... )
-        ('https://github.com/OpenHands/extensions', 'main', 'm.json')
+        >>> parse_marketplace_url("/workspace/skills")
+        (None, 'main', 'marketplaces/default.json')  # local path stored in result[0]
+
+        >>> parse_marketplace_url("https://github.com/OpenHands/extensions")
+        ('https://github.com/OpenHands/extensions', 'main', 'marketplaces/default.json')
+
+        >>> parse_marketplace_url("https://github.com/user/repo@develop:custom.json")
+        ('https://github.com/user/repo', 'develop', 'custom.json')
 
     Args:
-        url: Raw GitHub URL to the marketplace JSON file.
+        url: URL or local path to the skills repository.
 
     Returns:
-        Tuple of (repo_url, branch, marketplace_path)
-
-    Raises:
-        ValueError: If the URL format is invalid.
+        Tuple of (repo_url_or_none, branch, marketplace_path).
+        For local paths, repo_url is None and the path is stored separately.
     """
-    prefix = "https://raw.githubusercontent.com/"
-    if not url.startswith(prefix):
-        raise ValueError(
-            f"Invalid marketplace URL: {url}. "
-            f"Expected format: {prefix}<owner>/<repo>/<branch>/<path>"
-        )
+    # Check if it's a local path
+    if url.startswith("/") or url.startswith("file://"):
+        path = url[7:] if url.startswith("file://") else url
 
-    # Parse: owner/repo/branch/path/to/file.json
-    path_part = url[len(prefix) :]
-    parts = path_part.split("/")
+        # Check for :marketplace_path suffix
+        if ":" in path:
+            local_path, marketplace_path = path.rsplit(":", 1)
+        else:
+            local_path = path
+            marketplace_path = DEFAULT_MARKETPLACE_PATH
 
-    if len(parts) < 4:
-        raise ValueError(
-            f"Invalid marketplace URL: {url}. "
-            f"Expected format: {prefix}<owner>/<repo>/<branch>/<path>"
-        )
+        # Store local path in a special way - we'll return None for repo_url
+        # and the caller will check if the URL was a local path
+        return None, local_path, marketplace_path
 
-    owner = parts[0]
-    repo = parts[1]
-    branch = parts[2]
-    marketplace_path = "/".join(parts[3:])
+    # Parse URL with optional @branch and :path
+    repo_url = url
+    branch = DEFAULT_BRANCH
+    marketplace_path = DEFAULT_MARKETPLACE_PATH
 
-    repo_url = f"https://github.com/{owner}/{repo}"
+    # Extract :marketplace_path first (from the end)
+    if ":" in repo_url:
+        # Find the last : that's not part of ://
+        protocol_end = repo_url.find("://")
+        if protocol_end != -1:
+            rest = repo_url[protocol_end + 3 :]
+            if ":" in rest:
+                colon_pos = rest.rfind(":")
+                marketplace_path = rest[colon_pos + 1 :]
+                repo_url = repo_url[: protocol_end + 3 + colon_pos]
+        else:
+            # No protocol, simple split
+            colon_pos = repo_url.rfind(":")
+            marketplace_path = repo_url[colon_pos + 1 :]
+            repo_url = repo_url[:colon_pos]
+
+    # Extract @branch
+    if "@" in repo_url:
+        at_pos = repo_url.rfind("@")
+        branch = repo_url[at_pos + 1 :]
+        repo_url = repo_url[:at_pos]
 
     return repo_url, branch, marketplace_path
 
 
 def load_public_skills(marketplace_url: str = DEFAULT_MARKETPLACE_URL) -> list[Skill]:
-    """Load skills from a public skills repository.
+    """Load skills from a skills repository (remote or local).
 
-    This function maintains a local git clone of the skills repository. On first run,
-    it clones the repository to ~/.openhands/cache/skills/. On subsequent runs, it
-    pulls the latest changes to keep skills up-to-date.
+    For remote repositories, this function maintains a local git clone in
+    ~/.openhands/cache/skills/. On first run it clones; on subsequent runs
+    it pulls the latest changes.
 
     Only skills listed in the marketplace JSON file are loaded.
 
     Args:
-        marketplace_url: Raw GitHub URL to the marketplace JSON file.
-            Format: https://raw.githubusercontent.com/<owner>/<repo>/<branch>/<path>
-            Defaults to the official OpenHands extensions marketplace.
+        marketplace_url: URL or local path to the skills repository.
+            Format: <url_or_path>[@branch][:marketplace_path]
+
+            Examples:
+                - "https://github.com/OpenHands/extensions"
+                - "https://github.com/org/repo@develop"
+                - "https://github.com/org/repo@main:custom.json"
+                - "https://gitlab.com/org/skills"
+                - "/workspace/my-skills"
+                - "/workspace/my-skills:custom/marketplace.json"
 
     Returns:
         List of Skill objects loaded from the repository.
@@ -926,65 +955,66 @@ def load_public_skills(marketplace_url: str = DEFAULT_MARKETPLACE_URL) -> list[S
         >>>
         >>> # Load from custom marketplace
         >>> skills = load_public_skills(
-        ...     "https://raw.githubusercontent.com/myorg/skills/main/marketplaces/custom.json"
+        ...     "https://github.com/myorg/skills:marketplaces/custom.json"
         ... )
         >>>
-        >>> # Load from specific branch
-        >>> skills = load_public_skills(
-        ...     "https://raw.githubusercontent.com/OpenHands/extensions/develop/marketplaces/beta.json"
-        ... )
+        >>> # Load from local path
+        >>> skills = load_public_skills("/workspace/my-skills")
     """
     from openhands.sdk.plugin import Marketplace
 
     all_skills: list[Skill] = []
 
-    try:
-        repo_url, branch, marketplace_path = parse_marketplace_url(marketplace_url)
-    except ValueError as e:
-        logger.warning(str(e))
-        return all_skills
+    parsed = parse_marketplace_url(marketplace_url)
+    repo_url_or_none, branch_or_local_path, marketplace_path = parsed
 
-    cache_dir = get_skills_cache_dir()
-
-    try:
-        # Get or update the repository
-        repo_path = update_skills_repository(repo_url, branch, cache_dir)
-
-        if repo_path is None:
-            logger.warning(f"Failed to access skills repository: {repo_url}")
+    # Check if it's a local path (repo_url is None)
+    if repo_url_or_none is None:
+        local_path = branch_or_local_path
+        repo_path = Path(local_path)
+        if not repo_path.exists():
+            logger.warning(f"Local skills path not found: {local_path}")
             return all_skills
-
-        # Find the skills directory
-        skills_dir = repo_path / "skills"
-        if not skills_dir.exists():
-            logger.debug(f"Skills directory not found: {skills_dir}")
-            return all_skills
-
-        # Load skills from marketplace
-        marketplace_file = repo_path / marketplace_path
-        if not marketplace_file.exists():
-            logger.warning(f"Marketplace file not found: {marketplace_file}")
-            return all_skills
+    else:
+        # Remote repository - clone/update it
+        repo_url = repo_url_or_none
+        branch = branch_or_local_path
+        cache_dir = get_skills_cache_dir()
 
         try:
-            with open(marketplace_file) as f:
-                data = json.load(f)
-            marketplace = Marketplace.model_validate({**data, "path": str(repo_path)})
-            for plugin in marketplace.plugins:
-                skill = _load_skill_by_name(skills_dir, plugin.name, repo_path)
-                if skill:
-                    all_skills.append(skill)
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning(f"Failed to load marketplace {marketplace_file}: {e}")
+            repo_path_result = update_skills_repository(repo_url, branch, cache_dir)
+            if repo_path_result is None:
+                logger.warning(f"Failed to access skills repository: {repo_url}")
+                return all_skills
+            repo_path = repo_path_result
+        except Exception as e:
+            logger.warning(f"Failed to update skills repository: {e}")
+            return all_skills
 
-        logger.info(f"Found {len(all_skills)} skill files in public skills repository")
+    # Find the skills directory
+    skills_dir = repo_path / "skills"
+    if not skills_dir.exists():
+        logger.debug(f"Skills directory not found: {skills_dir}")
+        return all_skills
 
-    except Exception as e:
-        logger.warning(f"Failed to load public skills from {repo_url}: {str(e)}")
+    # Load skills from marketplace
+    marketplace_file = repo_path / marketplace_path
+    if not marketplace_file.exists():
+        logger.warning(f"Marketplace file not found: {marketplace_file}")
+        return all_skills
 
-    logger.info(
-        f"Loaded {len(all_skills)} public skills: {[s.name for s in all_skills]}"
-    )
+    try:
+        with open(marketplace_file) as f:
+            data = json.load(f)
+        marketplace = Marketplace.model_validate({**data, "path": str(repo_path)})
+        for plugin in marketplace.plugins:
+            skill = _load_skill_by_name(skills_dir, plugin.name, repo_path)
+            if skill:
+                all_skills.append(skill)
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning(f"Failed to load marketplace {marketplace_file}: {e}")
+
+    logger.info(f"Loaded {len(all_skills)} skills from {marketplace_url}")
     return all_skills
 
 
