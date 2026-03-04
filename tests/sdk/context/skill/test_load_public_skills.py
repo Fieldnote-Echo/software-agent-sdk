@@ -11,7 +11,6 @@ from openhands.sdk.context.skills import (
     KeywordTrigger,
     Skill,
     load_public_skills,
-    parse_marketplace_url,
 )
 from openhands.sdk.context.skills.utils import update_skills_repository
 
@@ -168,35 +167,23 @@ def mock_repo_with_agentskills_references(tmp_path):
     return repo_dir
 
 
-def test_load_public_skills_success(mock_repo_dir, tmp_path):
-    """Test successfully loading skills from cached repository."""
+def test_load_public_skills_success(mock_repo_dir):
+    """Test successfully loading skills from local marketplace file."""
+    marketplace_file = mock_repo_dir / "marketplaces" / "default.json"
+    skills = load_public_skills(str(marketplace_file))
 
-    def mock_update_repo(repo_url, branch, cache_dir):
-        return mock_repo_dir
+    assert len(skills) == 3
+    skill_names = {s.name for s in skills}
+    assert skill_names == {"git", "docker", "testing"}
 
-    with (
-        patch(
-            "openhands.sdk.context.skills.skill.update_skills_repository",
-            side_effect=mock_update_repo,
-        ),
-        patch(
-            "openhands.sdk.context.skills.skill.get_skills_cache_dir",
-            return_value=tmp_path,
-        ),
-    ):
-        skills = load_public_skills()
-        assert len(skills) == 3
-        skill_names = {s.name for s in skills}
-        assert skill_names == {"git", "docker", "testing"}
+    # Check git skill details
+    git_skill = next(s for s in skills if s.name == "git")
+    assert isinstance(git_skill.trigger, KeywordTrigger)
+    assert "git" in git_skill.trigger.keywords
 
-        # Check git skill details
-        git_skill = next(s for s in skills if s.name == "git")
-        assert isinstance(git_skill.trigger, KeywordTrigger)
-        assert "git" in git_skill.trigger.keywords
-
-        # Check testing skill (no trigger - always active)
-        testing_skill = next(s for s in skills if s.name == "testing")
-        assert testing_skill.trigger is None
+    # Check testing skill (no trigger - always active)
+    testing_skill = next(s for s in skills if s.name == "testing")
+    assert testing_skill.trigger is None
 
 
 def test_load_public_skills_repo_update_fails(tmp_path):
@@ -250,12 +237,14 @@ def test_load_public_skills_with_invalid_skill(tmp_path):
     skills_dir.mkdir()
 
     # Valid skill
-    valid_skill = skills_dir / "valid.md"
-    valid_skill.write_text("---\nname: valid\n---\nValid skill content.")
+    valid_dir = skills_dir / "valid"
+    valid_dir.mkdir()
+    (valid_dir / "SKILL.md").write_text("---\nname: valid\n---\nValid skill content.")
 
     # Invalid skill
-    invalid_skill = skills_dir / "invalid.md"
-    invalid_skill.write_text(
+    invalid_dir = skills_dir / "invalid"
+    invalid_dir.mkdir()
+    (invalid_dir / "SKILL.md").write_text(
         "---\nname: invalid\ntriggers: not_a_list\n---\nInvalid skill."
     )
 
@@ -270,25 +259,13 @@ def test_load_public_skills_with_invalid_skill(tmp_path):
             {"name": "invalid", "source": "./invalid"},
         ],
     }
-    (marketplaces_dir / "default.json").write_text(json.dumps(marketplace))
+    marketplace_file = marketplaces_dir / "default.json"
+    marketplace_file.write_text(json.dumps(marketplace))
 
-    def mock_update_repo(repo_url, branch, cache_dir):
-        return repo_dir
-
-    with (
-        patch(
-            "openhands.sdk.context.skills.skill.update_skills_repository",
-            side_effect=mock_update_repo,
-        ),
-        patch(
-            "openhands.sdk.context.skills.skill.get_skills_cache_dir",
-            return_value=tmp_path,
-        ),
-    ):
-        skills = load_public_skills()
-        # Only valid skill should be loaded, invalid one skipped
-        assert len(skills) == 1
-        assert skills[0].name == "valid"
+    skills = load_public_skills(str(marketplace_file))
+    # Only valid skill should be loaded, invalid one skipped
+    assert len(skills) == 1
+    assert skills[0].name == "valid"
 
 
 def test_update_skills_repository_clone_new(tmp_path):
@@ -406,27 +383,14 @@ def test_update_skills_repository_update_fails_uses_cache(tmp_path):
         assert result_path == repo_path
 
 
-def test_agent_context_loads_public_skills(mock_repo_dir, tmp_path):
+def test_agent_context_loads_public_skills(mock_repo_dir):
     """Test that AgentContext loads public skills when enabled."""
-
-    def mock_update_repo(repo_url, branch, cache_dir):
-        return mock_repo_dir
-
-    with (
-        patch(
-            "openhands.sdk.context.skills.skill.update_skills_repository",
-            side_effect=mock_update_repo,
-        ),
-        patch(
-            "openhands.sdk.context.skills.skill.get_skills_cache_dir",
-            return_value=tmp_path,
-        ),
-    ):
-        context = AgentContext(load_public_skills=True)
-        skill_names = {s.name for s in context.skills}
-        assert "git" in skill_names
-        assert "docker" in skill_names
-        assert "testing" in skill_names
+    marketplace_file = mock_repo_dir / "marketplaces" / "default.json"
+    context = AgentContext(load_public_skills=True, marketplace=str(marketplace_file))
+    skill_names = {s.name for s in context.skills}
+    assert "git" in skill_names
+    assert "docker" in skill_names
+    assert "testing" in skill_names
 
 
 def test_agent_context_can_disable_public_skills_loading():
@@ -435,11 +399,9 @@ def test_agent_context_can_disable_public_skills_loading():
     assert context.skills == []
 
 
-def test_agent_context_merges_explicit_and_public_skills(mock_repo_dir, tmp_path):
+def test_agent_context_merges_explicit_and_public_skills(mock_repo_dir):
     """Test that explicit skills and public skills are merged correctly."""
-
-    def mock_update_repo(repo_url, branch, cache_dir):
-        return mock_repo_dir
+    marketplace_file = mock_repo_dir / "marketplaces" / "default.json"
 
     # Create explicit skill
     explicit_skill = Skill(
@@ -448,28 +410,20 @@ def test_agent_context_merges_explicit_and_public_skills(mock_repo_dir, tmp_path
         trigger=None,
     )
 
-    with (
-        patch(
-            "openhands.sdk.context.skills.skill.update_skills_repository",
-            side_effect=mock_update_repo,
-        ),
-        patch(
-            "openhands.sdk.context.skills.skill.get_skills_cache_dir",
-            return_value=tmp_path,
-        ),
-    ):
-        context = AgentContext(skills=[explicit_skill], load_public_skills=True)
-        skill_names = {s.name for s in context.skills}
-        assert "explicit_skill" in skill_names
-        assert "git" in skill_names
-        assert len(context.skills) == 4  # 1 explicit + 3 public
+    context = AgentContext(
+        skills=[explicit_skill],
+        load_public_skills=True,
+        marketplace=str(marketplace_file),
+    )
+    skill_names = {s.name for s in context.skills}
+    assert "explicit_skill" in skill_names
+    assert "git" in skill_names
+    assert len(context.skills) == 4  # 1 explicit + 3 public
 
 
-def test_agent_context_explicit_skill_takes_precedence(mock_repo_dir, tmp_path):
+def test_agent_context_explicit_skill_takes_precedence(mock_repo_dir):
     """Test that explicitly provided skills take precedence over public skills."""
-
-    def mock_update_repo(repo_url, branch, cache_dir):
-        return mock_repo_dir
+    marketplace_file = mock_repo_dir / "marketplaces" / "default.json"
 
     # Create explicit skill with same name as public skill
     explicit_skill = Skill(
@@ -478,72 +432,20 @@ def test_agent_context_explicit_skill_takes_precedence(mock_repo_dir, tmp_path):
         trigger=None,
     )
 
-    with (
-        patch(
-            "openhands.sdk.context.skills.skill.update_skills_repository",
-            side_effect=mock_update_repo,
-        ),
-        patch(
-            "openhands.sdk.context.skills.skill.get_skills_cache_dir",
-            return_value=tmp_path,
-        ),
-    ):
-        context = AgentContext(skills=[explicit_skill], load_public_skills=True)
-        # Should have 3 skills (1 explicit git + 2 other public skills)
-        assert len(context.skills) == 3
-        git_skill = next(s for s in context.skills if s.name == "git")
-        # Explicit skill should be used, not the public skill
-        assert git_skill.content == "Explicit git skill content."
-
-
-def test_load_public_skills_custom_repo(mock_repo_dir, tmp_path):
-    """Test loading from a custom repository URL via marketplace_url."""
-
-    def mock_update_repo(repo_url, branch, cache_dir):
-        assert repo_url == "https://github.com/custom-org/custom-skills"
-        return mock_repo_dir
-
-    with (
-        patch(
-            "openhands.sdk.context.skills.skill.update_skills_repository",
-            side_effect=mock_update_repo,
-        ),
-        patch(
-            "openhands.sdk.context.skills.skill.get_skills_cache_dir",
-            return_value=tmp_path,
-        ),
-    ):
-        # Custom repo - uses default branch and marketplace path
-        custom_url = "https://github.com/custom-org/custom-skills"
-        skills = load_public_skills(custom_url)
-        assert len(skills) == 3
-
-
-def test_load_public_skills_custom_branch(mock_repo_dir, tmp_path):
-    """Test loading from a specific branch via marketplace_url."""
-
-    def mock_update_repo(repo_url, branch, cache_dir):
-        assert branch == "develop"
-        return mock_repo_dir
-
-    with (
-        patch(
-            "openhands.sdk.context.skills.skill.update_skills_repository",
-            side_effect=mock_update_repo,
-        ),
-        patch(
-            "openhands.sdk.context.skills.skill.get_skills_cache_dir",
-            return_value=tmp_path,
-        ),
-    ):
-        # Branch specified via @branch suffix
-        develop_url = "https://github.com/OpenHands/extensions@develop"
-        skills = load_public_skills(develop_url)
-        assert len(skills) == 3
+    context = AgentContext(
+        skills=[explicit_skill],
+        load_public_skills=True,
+        marketplace=str(marketplace_file),
+    )
+    # Should have 3 skills (1 explicit git + 2 other public skills)
+    assert len(context.skills) == 3
+    git_skill = next(s for s in context.skills if s.name == "git")
+    # Explicit skill should be used, not the public skill
+    assert git_skill.content == "Explicit git skill content."
 
 
 def test_load_public_skills_excludes_reference_markdown_in_agentskills_folders(
-    mock_repo_with_agentskills_references, tmp_path
+    mock_repo_with_agentskills_references,
 ):
     """Test that markdown files in SKILL.md subdirs are NOT loaded as skills.
 
@@ -561,56 +463,45 @@ def test_load_public_skills_excludes_reference_markdown_in_agentskills_folders(
     - readiness-report/references/*.md -> NOT loaded (reference files)
     - legacy-skill.md -> loaded as "legacy-skill" skill
     """
+    marketplace_file = (
+        mock_repo_with_agentskills_references / "marketplaces" / "default.json"
+    )
+    skills = load_public_skills(str(marketplace_file))
 
-    def mock_update_repo(repo_url, branch, cache_dir):
-        return mock_repo_with_agentskills_references
+    # Get all skill names
+    skill_names = {s.name for s in skills}
 
-    with (
-        patch(
-            "openhands.sdk.context.skills.skill.update_skills_repository",
-            side_effect=mock_update_repo,
-        ),
-        patch(
-            "openhands.sdk.context.skills.skill.get_skills_cache_dir",
-            return_value=tmp_path,
-        ),
-    ):
-        skills = load_public_skills()
+    # Should have exactly 3 skills: theme-factory, readiness-report, legacy-skill
+    assert len(skills) == 3, (
+        f"Expected 3 skills but got {len(skills)}. "
+        f"Skill names: {skill_names}. "
+        "Reference markdown files in themes/ or references/ subdirectories "
+        "should NOT be loaded as separate skills."
+    )
 
-        # Get all skill names
-        skill_names = {s.name for s in skills}
+    # Verify the correct skills are loaded
+    assert "theme-factory" in skill_names
+    assert "readiness-report" in skill_names
+    assert "legacy-skill" in skill_names
 
-        # Should have exactly 3 skills: theme-factory, readiness-report, legacy-skill
-        assert len(skills) == 3, (
-            f"Expected 3 skills but got {len(skills)}. "
-            f"Skill names: {skill_names}. "
-            "Reference markdown files in themes/ or references/ subdirectories "
-            "should NOT be loaded as separate skills."
+    # Verify reference files are NOT loaded as skills
+    # These would be loaded with names like "theme-factory/themes/arctic-frost"
+    for skill in skills:
+        assert "arctic-frost" not in skill.name, (
+            f"Reference arctic-frost.md loaded as skill: {skill.name}"
         )
-
-        # Verify the correct skills are loaded
-        assert "theme-factory" in skill_names
-        assert "readiness-report" in skill_names
-        assert "legacy-skill" in skill_names
-
-        # Verify reference files are NOT loaded as skills
-        # These would be loaded with names like "theme-factory/themes/arctic-frost"
-        for skill in skills:
-            assert "arctic-frost" not in skill.name, (
-                f"Reference arctic-frost.md loaded as skill: {skill.name}"
-            )
-            assert "ocean-depths" not in skill.name, (
-                f"Reference ocean-depths.md loaded as skill: {skill.name}"
-            )
-            assert "sunset-boulevard" not in skill.name, (
-                f"Reference sunset-boulevard.md loaded as skill: {skill.name}"
-            )
-            assert "criteria" not in skill.name, (
-                f"Reference criteria.md loaded as skill: {skill.name}"
-            )
-            assert "maturity-levels" not in skill.name, (
-                f"Reference maturity-levels.md loaded as skill: {skill.name}"
-            )
+        assert "ocean-depths" not in skill.name, (
+            f"Reference ocean-depths.md loaded as skill: {skill.name}"
+        )
+        assert "sunset-boulevard" not in skill.name, (
+            f"Reference sunset-boulevard.md loaded as skill: {skill.name}"
+        )
+        assert "criteria" not in skill.name, (
+            f"Reference criteria.md loaded as skill: {skill.name}"
+        )
+        assert "maturity-levels" not in skill.name, (
+            f"Reference maturity-levels.md loaded as skill: {skill.name}"
+        )
 
 
 # Tests for marketplace-based skill filtering
@@ -677,31 +568,16 @@ def mock_repo_with_marketplace(tmp_path):
     return repo_dir
 
 
-def test_load_public_skills_filters_by_marketplace(
-    mock_repo_with_marketplace, tmp_path
-):
+def test_load_public_skills_filters_by_marketplace(mock_repo_with_marketplace):
     """Test that load_public_skills only loads skills listed in the marketplace."""
+    marketplace_file = mock_repo_with_marketplace / "marketplaces" / "default.json"
+    skills = load_public_skills(str(marketplace_file))
 
-    def mock_update_repo(repo_url, branch, cache_dir):
-        return mock_repo_with_marketplace
-
-    with (
-        patch(
-            "openhands.sdk.context.skills.skill.update_skills_repository",
-            side_effect=mock_update_repo,
-        ),
-        patch(
-            "openhands.sdk.context.skills.skill.get_skills_cache_dir",
-            return_value=tmp_path,
-        ),
-    ):
-        skills = load_public_skills()
-
-        # Should only have git and docker (from marketplace), not internal-only
-        skill_names = {s.name for s in skills}
-        assert skill_names == {"git", "docker"}
-        assert "internal-only" not in skill_names
-        assert "experimental" not in skill_names
+    # Should only have git and docker (from marketplace), not internal-only
+    skill_names = {s.name for s in skills}
+    assert skill_names == {"git", "docker"}
+    assert "internal-only" not in skill_names
+    assert "experimental" not in skill_names
 
 
 def test_load_public_skills_returns_empty_when_no_marketplace(tmp_path):
@@ -741,23 +617,20 @@ def test_load_public_skills_returns_empty_when_no_marketplace(tmp_path):
         assert skills == []
 
 
-def test_load_public_skills_handles_legacy_md_files_with_marketplace(tmp_path):
-    """Test marketplace filtering works with legacy .md skill files."""
+def test_load_public_skills_handles_skills_with_marketplace(tmp_path):
+    """Test marketplace filtering works with different skill structures."""
     repo_dir = tmp_path / "mock_repo"
     repo_dir.mkdir()
     skills_dir = repo_dir / "skills"
     skills_dir.mkdir()
 
-    # Create legacy .md skills
-    (skills_dir / "git.md").write_text(
-        "---\nname: git\ntriggers:\n  - git\n---\nGit skill."
-    )
-    (skills_dir / "docker.md").write_text(
-        "---\nname: docker\ntriggers:\n  - docker\n---\nDocker skill."
-    )
-    (skills_dir / "internal.md").write_text(
-        "---\nname: internal\ntriggers:\n  - internal\n---\nInternal skill."
-    )
+    # Create skills in directory format with SKILL.md
+    for name in ["git", "docker", "internal"]:
+        skill_dir = skills_dir / name
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {name}\ntriggers:\n  - {name}\n---\n{name} skill."
+        )
 
     # Create marketplace that includes git and docker but not internal
     marketplaces_dir = repo_dir / "marketplaces"
@@ -766,92 +639,23 @@ def test_load_public_skills_handles_legacy_md_files_with_marketplace(tmp_path):
         "name": "default",
         "owner": {"name": "Test Team"},
         "plugins": [
-            {"name": "git", "source": "./git.md"},
-            {"name": "docker", "source": "./docker.md"},
+            {"name": "git", "source": "./git"},
+            {"name": "docker", "source": "./docker"},
         ],
     }
-    (marketplaces_dir / "default.json").write_text(json.dumps(marketplace))
+    marketplace_file = marketplaces_dir / "default.json"
+    marketplace_file.write_text(json.dumps(marketplace))
 
-    (repo_dir / ".git").mkdir()
+    skills = load_public_skills(str(marketplace_file))
 
-    def mock_update_repo(repo_url, branch, cache_dir):
-        return repo_dir
-
-    with (
-        patch(
-            "openhands.sdk.context.skills.skill.update_skills_repository",
-            side_effect=mock_update_repo,
-        ),
-        patch(
-            "openhands.sdk.context.skills.skill.get_skills_cache_dir",
-            return_value=tmp_path,
-        ),
-    ):
-        skills = load_public_skills()
-
-        # Should only have git and docker from marketplace
-        skill_names = {s.name for s in skills}
-        assert skill_names == {"git", "docker"}
-        assert "internal" not in skill_names
+    # Should only have git and docker from marketplace
+    skill_names = {s.name for s in skills}
+    assert skill_names == {"git", "docker"}
+    assert "internal" not in skill_names
 
 
-def test_parse_marketplace_url():
-    """Test parsing marketplace URLs into components."""
-    # Simple GitHub URL (uses defaults)
-    repo_url, branch, path = parse_marketplace_url(
-        "https://github.com/OpenHands/extensions"
-    )
-    assert repo_url == "https://github.com/OpenHands/extensions"
-    assert branch == "main"
-    assert path == "marketplaces/default.json"
-
-    # GitHub URL with branch
-    repo_url, branch, path = parse_marketplace_url(
-        "https://github.com/user/repo@develop"
-    )
-    assert repo_url == "https://github.com/user/repo"
-    assert branch == "develop"
-    assert path == "marketplaces/default.json"
-
-    # GitHub URL with branch and path
-    repo_url, branch, path = parse_marketplace_url(
-        "https://github.com/user/repo@develop:custom/marketplace.json"
-    )
-    assert repo_url == "https://github.com/user/repo"
-    assert branch == "develop"
-    assert path == "custom/marketplace.json"
-
-    # GitLab URL
-    repo_url, branch, path = parse_marketplace_url(
-        "https://gitlab.com/org/skills@main:marketplaces/default.json"
-    )
-    assert repo_url == "https://gitlab.com/org/skills"
-    assert branch == "main"
-    assert path == "marketplaces/default.json"
-
-    # Local path (returns None for repo_url)
-    repo_url, local_path, path = parse_marketplace_url("/workspace/my-skills")
-    assert repo_url is None
-    assert local_path == "/workspace/my-skills"
-    assert path == "marketplaces/default.json"
-
-    # Local path with custom marketplace
-    repo_url, local_path, path = parse_marketplace_url(
-        "/workspace/my-skills:custom/marketplace.json"
-    )
-    assert repo_url is None
-    assert local_path == "/workspace/my-skills"
-    assert path == "custom/marketplace.json"
-
-    # file:// URL
-    repo_url, local_path, path = parse_marketplace_url("file:///workspace/skills")
-    assert repo_url is None
-    assert local_path == "/workspace/skills"
-    assert path == "marketplaces/default.json"
-
-
-def test_load_public_skills_with_custom_marketplace_url(tmp_path):
-    """Test that marketplace_url parameter allows using a custom marketplace."""
+def test_load_public_skills_with_custom_marketplace(tmp_path):
+    """Test loading skills from different local marketplace files."""
     repo_dir = tmp_path / "mock_repo"
     repo_dir.mkdir()
     skills_dir = repo_dir / "skills"
@@ -878,7 +682,8 @@ def test_load_public_skills_with_custom_marketplace_url(tmp_path):
             {"name": "docker", "source": "./docker"},
         ],
     }
-    (marketplaces_dir / "default.json").write_text(json.dumps(default_marketplace))
+    default_file = marketplaces_dir / "default.json"
+    default_file.write_text(json.dumps(default_marketplace))
 
     # Custom marketplace with all skills
     custom_marketplace = {
@@ -891,38 +696,22 @@ def test_load_public_skills_with_custom_marketplace_url(tmp_path):
             {"name": "experimental", "source": "./experimental"},
         ],
     }
-    (marketplaces_dir / "custom.json").write_text(json.dumps(custom_marketplace))
+    custom_file = marketplaces_dir / "custom.json"
+    custom_file.write_text(json.dumps(custom_marketplace))
 
-    (repo_dir / ".git").mkdir()
+    # Default marketplace should only have git and docker
+    skills_default = load_public_skills(str(default_file))
+    skill_names_default = {s.name for s in skills_default}
+    assert skill_names_default == {"git", "docker"}
 
-    def mock_update_repo(repo_url, branch, cache_dir):
-        return repo_dir
-
-    with (
-        patch(
-            "openhands.sdk.context.skills.skill.update_skills_repository",
-            side_effect=mock_update_repo,
-        ),
-        patch(
-            "openhands.sdk.context.skills.skill.get_skills_cache_dir",
-            return_value=tmp_path,
-        ),
-    ):
-        # Default marketplace should only have git and docker
-        default_url = "https://github.com/OpenHands/extensions"
-        skills_default = load_public_skills(default_url)
-        skill_names_default = {s.name for s in skills_default}
-        assert skill_names_default == {"git", "docker"}
-
-        # Custom marketplace should have all skills
-        custom_url = "https://github.com/OpenHands/extensions:marketplaces/custom.json"
-        skills_custom = load_public_skills(custom_url)
-        skill_names_custom = {s.name for s in skills_custom}
-        assert skill_names_custom == {"git", "docker", "internal-only", "experimental"}
+    # Custom marketplace should have all skills
+    skills_custom = load_public_skills(str(custom_file))
+    skill_names_custom = {s.name for s in skills_custom}
+    assert skill_names_custom == {"git", "docker", "internal-only", "experimental"}
 
 
 def test_load_public_skills_from_local_path(tmp_path):
-    """Test loading skills from a local path."""
+    """Test loading skills from a local marketplace file."""
     repo_dir = tmp_path / "local_skills"
     repo_dir.mkdir()
     skills_dir = repo_dir / "skills"
@@ -947,9 +736,10 @@ def test_load_public_skills_from_local_path(tmp_path):
             {"name": "docker", "source": "./docker"},
         ],
     }
-    (marketplaces_dir / "default.json").write_text(json.dumps(marketplace))
+    marketplace_file = marketplaces_dir / "default.json"
+    marketplace_file.write_text(json.dumps(marketplace))
 
-    # Load from local path - no mocking needed!
-    skills = load_public_skills(str(repo_dir))
+    # Load from local marketplace file
+    skills = load_public_skills(str(marketplace_file))
     skill_names = {s.name for s in skills}
     assert skill_names == {"git", "docker"}

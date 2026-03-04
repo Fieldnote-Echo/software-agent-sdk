@@ -845,176 +845,89 @@ def load_project_skills(work_dir: str | Path) -> list[Skill]:
     return all_skills
 
 
-# Default marketplace URL
-DEFAULT_MARKETPLACE_URL = "https://github.com/OpenHands/extensions"
-DEFAULT_MARKETPLACE_PATH = "marketplaces/default.json"
-DEFAULT_BRANCH = "main"
+# Default marketplace file
+DEFAULT_MARKETPLACE = (
+    "https://raw.githubusercontent.com"
+    "/OpenHands/extensions/main/marketplaces/default.json"
+)
 
 
-def parse_marketplace_url(url: str) -> tuple[str | None, str, str]:
-    """Parse a marketplace URL into source, branch, and path components.
-
-    Supports:
-        - Local paths: /path/to/repo or /path/to/repo:marketplace.json
-        - Git URLs: https://github.com/owner/repo[@branch][:path]
-
-    Format: <url_or_path>[@branch][:marketplace_path]
-
-    Examples:
-        >>> parse_marketplace_url("/workspace/skills")
-        (None, 'main', 'marketplaces/default.json')  # local path stored in result[0]
-
-        >>> parse_marketplace_url("https://github.com/OpenHands/extensions")
-        ('https://github.com/OpenHands/extensions', 'main', 'marketplaces/default.json')
-
-        >>> parse_marketplace_url("https://github.com/user/repo@develop:custom.json")
-        ('https://github.com/user/repo', 'develop', 'custom.json')
+def load_public_skills(marketplace: str = DEFAULT_MARKETPLACE) -> list[Skill]:
+    """Load skills from a marketplace JSON file.
 
     Args:
-        url: URL or local path to the skills repository.
+        marketplace: URL or local path to a marketplace.json file.
 
     Returns:
-        Tuple of (repo_url_or_none, branch, marketplace_path).
-        For local paths, repo_url is None and the path is stored separately.
+        List of Skill objects.
     """
-    # Check if it's a local path
-    if url.startswith("/") or url.startswith("file://"):
-        path = url[7:] if url.startswith("file://") else url
-
-        # Check for :marketplace_path suffix
-        if ":" in path:
-            local_path, marketplace_path = path.rsplit(":", 1)
-        else:
-            local_path = path
-            marketplace_path = DEFAULT_MARKETPLACE_PATH
-
-        # Store local path in a special way - we'll return None for repo_url
-        # and the caller will check if the URL was a local path
-        return None, local_path, marketplace_path
-
-    # Parse URL with optional @branch and :path
-    repo_url = url
-    branch = DEFAULT_BRANCH
-    marketplace_path = DEFAULT_MARKETPLACE_PATH
-
-    # Extract :marketplace_path first (from the end)
-    if ":" in repo_url:
-        # Find the last : that's not part of ://
-        protocol_end = repo_url.find("://")
-        if protocol_end != -1:
-            rest = repo_url[protocol_end + 3 :]
-            if ":" in rest:
-                colon_pos = rest.rfind(":")
-                marketplace_path = rest[colon_pos + 1 :]
-                repo_url = repo_url[: protocol_end + 3 + colon_pos]
-        else:
-            # No protocol, simple split
-            colon_pos = repo_url.rfind(":")
-            marketplace_path = repo_url[colon_pos + 1 :]
-            repo_url = repo_url[:colon_pos]
-
-    # Extract @branch
-    if "@" in repo_url:
-        at_pos = repo_url.rfind("@")
-        branch = repo_url[at_pos + 1 :]
-        repo_url = repo_url[:at_pos]
-
-    return repo_url, branch, marketplace_path
-
-
-def load_public_skills(marketplace_url: str = DEFAULT_MARKETPLACE_URL) -> list[Skill]:
-    """Load skills from a skills repository (remote or local).
-
-    For remote repositories, this function maintains a local git clone in
-    ~/.openhands/cache/skills/. On first run it clones; on subsequent runs
-    it pulls the latest changes.
-
-    Only skills listed in the marketplace JSON file are loaded.
-
-    Args:
-        marketplace_url: URL or local path to the skills repository.
-            Format: <url_or_path>[@branch][:marketplace_path]
-
-            Examples:
-                - "https://github.com/OpenHands/extensions"
-                - "https://github.com/org/repo@develop"
-                - "https://github.com/org/repo@main:custom.json"
-                - "https://gitlab.com/org/skills"
-                - "/workspace/my-skills"
-                - "/workspace/my-skills:custom/marketplace.json"
-
-    Returns:
-        List of Skill objects loaded from the repository.
-        Returns empty list if loading fails.
-
-    Example:
-        >>> from openhands.sdk.context.skills import load_public_skills
-        >>>
-        >>> # Load from default marketplace
-        >>> skills = load_public_skills()
-        >>>
-        >>> # Load from custom marketplace
-        >>> skills = load_public_skills(
-        ...     "https://github.com/myorg/skills:marketplaces/custom.json"
-        ... )
-        >>>
-        >>> # Load from local path
-        >>> skills = load_public_skills("/workspace/my-skills")
-    """
-    from openhands.sdk.plugin import Marketplace
+    from openhands.sdk.plugin import Marketplace, MarketplacePluginSource
 
     all_skills: list[Skill] = []
 
-    parsed = parse_marketplace_url(marketplace_url)
-    repo_url_or_none, branch_or_local_path, marketplace_path = parsed
-
-    # Check if it's a local path (repo_url is None)
-    if repo_url_or_none is None:
-        local_path = branch_or_local_path
-        repo_path = Path(local_path)
-        if not repo_path.exists():
-            logger.warning(f"Local skills path not found: {local_path}")
-            return all_skills
-    else:
-        # Remote repository - clone/update it
-        repo_url = repo_url_or_none
-        branch = branch_or_local_path
-        cache_dir = get_skills_cache_dir()
-
-        try:
-            repo_path_result = update_skills_repository(repo_url, branch, cache_dir)
-            if repo_path_result is None:
-                logger.warning(f"Failed to access skills repository: {repo_url}")
-                return all_skills
-            repo_path = repo_path_result
-        except Exception as e:
-            logger.warning(f"Failed to update skills repository: {e}")
-            return all_skills
-
-    # Find the skills directory
-    skills_dir = repo_path / "skills"
-    if not skills_dir.exists():
-        logger.debug(f"Skills directory not found: {skills_dir}")
-        return all_skills
-
-    # Load skills from marketplace
-    marketplace_file = repo_path / marketplace_path
-    if not marketplace_file.exists():
-        logger.warning(f"Marketplace file not found: {marketplace_file}")
-        return all_skills
-
+    # Load the JSON
     try:
-        with open(marketplace_file) as f:
-            data = json.load(f)
-        marketplace = Marketplace.model_validate({**data, "path": str(repo_path)})
-        for plugin in marketplace.plugins:
-            skill = _load_skill_by_name(skills_dir, plugin.name, repo_path)
-            if skill:
-                all_skills.append(skill)
-    except (json.JSONDecodeError, OSError) as e:
-        logger.warning(f"Failed to load marketplace {marketplace_file}: {e}")
+        if marketplace.startswith(("/", "file://")):
+            path = marketplace[7:] if marketplace.startswith("file://") else marketplace
+            with open(path) as f:
+                data = json.load(f)
+            base_dir = Path(path).parent.parent  # up from marketplaces/
+        else:
+            import urllib.request
 
-    logger.info(f"Loaded {len(all_skills)} skills from {marketplace_url}")
+            with urllib.request.urlopen(marketplace, timeout=30) as resp:
+                data = json.load(resp)
+            base_dir = None
+    except Exception as e:
+        logger.warning(f"Failed to load marketplace {marketplace}: {e}")
+        return all_skills
+
+    # Parse and load skills
+    try:
+        mp = Marketplace.model_validate({**data, "path": str(base_dir or "")})
+    except Exception as e:
+        logger.warning(f"Invalid marketplace: {e}")
+        return all_skills
+
+    cache_dir = get_skills_cache_dir()
+
+    for plugin in mp.plugins:
+        source = plugin.source
+
+        if isinstance(source, str):
+            # Local path relative to marketplace
+            if base_dir is None:
+                continue
+            name = source[2:] if source.startswith("./") else source
+            skill_dir = base_dir / "skills" / name
+        elif isinstance(source, MarketplacePluginSource):
+            # Remote repo
+            if source.source == "github" and source.repo:
+                url = f"https://github.com/{source.repo}"
+            elif source.source == "url" and source.url:
+                url = source.url
+            else:
+                continue
+            repo = update_skills_repository(url, source.ref or "main", cache_dir)
+            if not repo:
+                continue
+            skill_dir = repo / (source.path or f"skills/{plugin.name}")
+        else:
+            continue
+
+        # Load skill from directory
+        skill_md = skill_dir / "SKILL.md"
+        if not skill_md.exists():
+            skill_md = skill_dir.with_suffix(".md")
+        if skill_md.exists():
+            try:
+                skill = Skill.load(path=skill_md, skill_base_dir=skill_dir.parent)
+                if skill:
+                    all_skills.append(skill)
+            except Exception as e:
+                logger.warning(f"Failed to load skill {plugin.name}: {e}")
+
+    logger.info(f"Loaded {len(all_skills)} skills from {marketplace}")
     return all_skills
 
 
@@ -1065,35 +978,28 @@ def load_available_skills(
     include_user: bool = False,
     include_project: bool = False,
     include_public: bool = False,
-    marketplace_url: str = DEFAULT_MARKETPLACE_URL,
+    marketplace: str = DEFAULT_MARKETPLACE,
 ) -> dict[str, Skill]:
     """Load and merge skills from SDK-level sources with consistent precedence.
 
     Precedence (later overrides earlier via dict updates):
         public (lowest) → user → project (highest)
 
-    This is the single entry-point for building a merged skill catalog from
-    the three SDK-shipped sources. Server-only sources (sandbox, org) are
-    layered on top by the caller.
-
     Args:
-        work_dir: Project/working directory for project skills. When None,
-            project skills are skipped regardless of *include_project*.
+        work_dir: Project/working directory for project skills.
         include_user: Load user-level skills (~/.agents/skills, etc.).
         include_project: Load project-level skills (requires *work_dir*).
-        include_public: Load public skills from the OpenHands extensions repo.
-        marketplace_url: URL specifying the repository and marketplace file.
-            Format: <repo_url>[@<branch>]:<marketplace_path>
+        include_public: Load public skills from marketplace.
+        marketplace: URL or local path to marketplace.json file.
 
     Returns:
-        Dict mapping skill name → Skill, with higher-precedence sources
-        overriding lower ones.
+        Dict mapping skill name → Skill.
     """
     available: dict[str, Skill] = {}
 
     if include_public:
         try:
-            for s in load_public_skills(marketplace_url):
+            for s in load_public_skills(marketplace):
                 available[s.name] = s
         except Exception as e:
             logger.warning(f"Failed to load public skills: {e}")

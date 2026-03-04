@@ -21,17 +21,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from openhands.sdk.context.skills import (
-    DEFAULT_MARKETPLACE_URL,
+    DEFAULT_MARKETPLACE,
     Skill,
     load_available_skills,
-    parse_marketplace_url,
 )
 from openhands.sdk.context.skills.skill import (
     load_skills_from_dir,
-)
-from openhands.sdk.context.skills.utils import (
-    get_skills_cache_dir,
-    update_skills_repository,
 )
 from openhands.sdk.logger import get_logger
 from openhands.sdk.utils import sanitized_env
@@ -284,20 +279,12 @@ def load_all_skills(
     org_repo_url: str | None = None,
     org_name: str | None = None,
     sandbox_exposed_urls: list[ExposedUrlData] | None = None,
-    marketplace_url: str | None = None,
+    marketplace: str | None = None,
 ) -> SkillLoadResult:
     """Load and merge skills from all configured sources.
 
-    Skills are loaded from multiple sources and merged with the following
-    precedence (later overrides earlier for duplicate names):
-    1. Sandbox skills (lowest) - Exposed URLs from sandbox
-    2. Public skills - From GitHub OpenHands/extensions repository
-    3. User skills - From ~/.openhands/skills/
-    4. Organization skills - From {org}/.openhands or equivalent
-    5. Project skills (highest) - From {workspace}/.openhands/skills/
-
     Args:
-        load_public: Whether to load public skills from OpenHands/extensions repo.
+        load_public: Whether to load public skills from marketplace.
         load_user: Whether to load user skills from ~/.openhands/skills/.
         load_project: Whether to load project skills from workspace.
         load_org: Whether to load organization-level skills.
@@ -305,16 +292,13 @@ def load_all_skills(
         org_repo_url: Pre-authenticated Git URL for org skills.
         org_name: Organization name for org skills.
         sandbox_exposed_urls: List of exposed URLs from sandbox.
-        marketplace_url: Raw GitHub URL to the marketplace JSON file.
-            If None, uses SDK default.
+        marketplace: URL or local path to marketplace.json file.
 
     Returns:
         SkillLoadResult containing merged skills and source counts.
     """
-    from openhands.sdk.context.skills import DEFAULT_MARKETPLACE_URL
-
-    if marketplace_url is None:
-        marketplace_url = DEFAULT_MARKETPLACE_URL
+    if marketplace is None:
+        marketplace = DEFAULT_MARKETPLACE
 
     sources: dict[str, int] = {}
     skill_lists: list[list[Skill]] = []
@@ -334,7 +318,7 @@ def load_all_skills(
         include_user=load_user,
         include_project=False,
         include_public=load_public,
-        marketplace_url=marketplace_url,
+        marketplace=marketplace,
     )
     sources["sdk_base"] = len(sdk_base)
     skill_lists.append(list(sdk_base.values()))
@@ -373,40 +357,20 @@ def load_all_skills(
     return SkillLoadResult(skills=all_skills, sources=sources)
 
 
-def sync_public_skills(
-    marketplace_url: str = DEFAULT_MARKETPLACE_URL,
-) -> tuple[bool, str]:
-    """Force refresh of public skills from a git repository.
+def sync_public_skills(marketplace: str = DEFAULT_MARKETPLACE) -> tuple[bool, str]:
+    """Force refresh of public skills.
 
-    This triggers a git pull on the cached skills repository to get
-    the latest skills from the specified marketplace's repository.
+    For remote marketplaces, this is a no-op since skills are fetched on demand.
+    For local marketplaces, no sync is needed.
 
     Args:
-        marketplace_url: URL or local path to the skills repository.
-            Format: <url_or_path>[@branch][:marketplace_path]
-            Defaults to the official OpenHands extensions marketplace.
+        marketplace: URL or local path to marketplace.json file.
 
     Returns:
         Tuple of (success: bool, message: str).
     """
-    try:
-        repo_url_or_none, branch_or_local_path, _ = parse_marketplace_url(
-            marketplace_url
-        )
-
-        # Local paths don't need syncing
-        if repo_url_or_none is None:
-            return (True, "Local path - no sync needed")
-
-        repo_url = repo_url_or_none
-        branch = branch_or_local_path
-        cache_dir = get_skills_cache_dir()
-        result = update_skills_repository(repo_url, branch, cache_dir)
-
-        if result:
-            return (True, "Skills repository synced successfully")
-        else:
-            return (False, "Failed to sync skills repository")
-    except Exception as e:
-        logger.warning(f"Failed to sync skills repository: {e}")
-        return (False, f"Sync failed: {str(e)}")
+    # With the new design, skills are loaded on-demand from the marketplace
+    # No separate sync step is needed
+    if marketplace.startswith(("/", "file://")):
+        return (True, "Local marketplace - no sync needed")
+    return (True, "Remote marketplace - skills loaded on demand")
