@@ -17,7 +17,7 @@ from openhands.sdk.context.skills.utils import update_skills_repository
 
 @pytest.fixture
 def mock_repo_dir(tmp_path):
-    """Create a mock git repository with skills."""
+    """Create a mock git repository with skills and marketplace."""
     repo_dir = tmp_path / "mock_repo"
     repo_dir.mkdir()
 
@@ -52,6 +52,20 @@ def mock_repo_dir(tmp_path):
     testing_skill.write_text(
         "---\nname: testing\n---\nTesting guidelines for all repos."
     )
+
+    # Create marketplace
+    marketplaces_dir = repo_dir / "marketplaces"
+    marketplaces_dir.mkdir()
+    marketplace = {
+        "name": "default",
+        "owner": {"name": "Test", "email": "test@test.com"},
+        "plugins": [
+            {"name": "git", "source": "./git"},
+            {"name": "docker", "source": "./docker"},
+            {"name": "testing", "source": "./testing"},
+        ],
+    }
+    (marketplaces_dir / "default.json").write_text(json.dumps(marketplace))
 
     # Create .git directory to simulate a git repo
     git_dir = repo_dir / ".git"
@@ -131,6 +145,20 @@ def mock_repo_with_agentskills_references(tmp_path):
     legacy_skill.write_text(
         "---\nname: legacy-skill\ntriggers:\n  - legacy\n---\nA legacy format skill.\n"
     )
+
+    # Create marketplace
+    marketplaces_dir = repo_dir / "marketplaces"
+    marketplaces_dir.mkdir()
+    marketplace = {
+        "name": "default",
+        "owner": {"name": "Test", "email": "test@test.com"},
+        "plugins": [
+            {"name": "theme-factory", "source": "./theme-factory"},
+            {"name": "readiness-report", "source": "./readiness-report"},
+            {"name": "legacy-skill", "source": "./legacy-skill"},
+        ],
+    }
+    (marketplaces_dir / "default.json").write_text(json.dumps(marketplace))
 
     # Create .git directory to simulate a git repo
     git_dir = repo_dir / ".git"
@@ -229,6 +257,19 @@ def test_load_public_skills_with_invalid_skill(tmp_path):
     invalid_skill.write_text(
         "---\nname: invalid\ntriggers: not_a_list\n---\nInvalid skill."
     )
+
+    # Create marketplace that references both skills
+    marketplaces_dir = repo_dir / "marketplaces"
+    marketplaces_dir.mkdir()
+    marketplace = {
+        "name": "default",
+        "owner": {"name": "Test", "email": "test@test.com"},
+        "plugins": [
+            {"name": "valid", "source": "./valid"},
+            {"name": "invalid", "source": "./invalid"},
+        ],
+    }
+    (marketplaces_dir / "default.json").write_text(json.dumps(marketplace))
 
     def mock_update_repo(repo_url, branch, cache_dir):
         return repo_dir
@@ -660,8 +701,8 @@ def test_load_public_skills_filters_by_marketplace(
         assert "experimental" not in skill_names
 
 
-def test_load_public_skills_loads_all_when_no_marketplace(tmp_path):
-    """Test that load_public_skills loads all skills when no marketplace exists."""
+def test_load_public_skills_returns_empty_when_no_marketplace(tmp_path):
+    """Test that load_public_skills returns empty list when marketplace is missing."""
     # Create repo without marketplace
     repo_dir = tmp_path / "mock_repo"
     repo_dir.mkdir()
@@ -693,9 +734,8 @@ def test_load_public_skills_loads_all_when_no_marketplace(tmp_path):
     ):
         skills = load_public_skills()
 
-        # Should have all skills since no marketplace exists
-        skill_names = {s.name for s in skills}
-        assert skill_names == {"git", "docker", "internal-only"}
+        # Should have no skills since marketplace is missing
+        assert skills == []
 
 
 def test_load_public_skills_handles_legacy_md_files_with_marketplace(tmp_path):
@@ -819,8 +859,3 @@ def test_load_public_skills_with_custom_marketplace_path(tmp_path):
         skills_custom = load_public_skills(marketplace_path="marketplaces/custom.json")
         skill_names_custom = {s.name for s in skills_custom}
         assert skill_names_custom == {"git", "docker", "internal-only", "experimental"}
-
-        # None marketplace_path should load all skills
-        skills_all = load_public_skills(marketplace_path=None)
-        skill_names_all = {s.name for s in skills_all}
-        assert skill_names_all == {"git", "docker", "internal-only", "experimental"}

@@ -72,14 +72,12 @@ class AgentContext(BaseModel):
             "This allows you to get the latest skills without SDK updates."
         ),
     )
-    marketplace_path: str | None = Field(
+    marketplace_path: str = Field(
         default=DEFAULT_MARKETPLACE_PATH,
         description=(
             "Path to the marketplace JSON file within the public skills repository. "
-            "The marketplace defines which skills are loaded by default. "
-            "Defaults to 'marketplaces/default.json'. Set to None to load all "
-            "skills without marketplace filtering, or specify a custom marketplace "
-            "path like 'marketplaces/custom.json'."
+            "The marketplace defines which skills are loaded. "
+            "Defaults to 'marketplaces/default.json'."
         ),
     )
     secrets: Mapping[str, SecretValue] | None = Field(
