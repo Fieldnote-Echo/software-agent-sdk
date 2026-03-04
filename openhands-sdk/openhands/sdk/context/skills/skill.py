@@ -912,6 +912,9 @@ def load_public_skills(marketplace: str = DEFAULT_MARKETPLACE) -> list[Skill]:
         if isinstance(source, str):
             # Local path relative to marketplace
             if base_dir is None:
+                logger.warning(
+                    f"Cannot load local skill '{plugin.name}' from remote marketplace"
+                )
                 continue
             name = source[2:] if source.startswith("./") else source
             skill_dir = base_dir / "skills" / name
@@ -922,12 +925,19 @@ def load_public_skills(marketplace: str = DEFAULT_MARKETPLACE) -> list[Skill]:
             elif source.source == "url" and source.url:
                 url = source.url
             else:
+                logger.warning(
+                    f"Invalid source for skill '{plugin.name}': {source.source}"
+                )
                 continue
             repo = update_skills_repository(url, source.ref or "main", cache_dir)
             if not repo:
+                logger.warning(f"Failed to clone repo for skill '{plugin.name}': {url}")
                 continue
             skill_dir = repo / (source.path or f"skills/{plugin.name}")
         else:
+            logger.warning(
+                f"Unknown source type for skill '{plugin.name}': {type(source)}"
+            )
             continue
 
         # Load skill from directory
@@ -939,8 +949,11 @@ def load_public_skills(marketplace: str = DEFAULT_MARKETPLACE) -> list[Skill]:
                 skill = Skill.load(path=skill_md, skill_base_dir=skill_dir.parent)
                 if skill:
                     all_skills.append(skill)
+                    logger.debug(f"Loaded skill: {skill.name}")
             except Exception as e:
-                logger.warning(f"Failed to load skill {plugin.name}: {e}")
+                logger.warning(f"Failed to load skill '{plugin.name}': {e}")
+        else:
+            logger.debug(f"Skill '{plugin.name}' not found at {skill_dir}")
 
     logger.info(f"Loaded {len(all_skills)} skills from {marketplace}")
     return all_skills
