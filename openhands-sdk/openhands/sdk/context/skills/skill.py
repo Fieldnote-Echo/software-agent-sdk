@@ -872,7 +872,12 @@ def _parse_raw_github_url(url: str) -> tuple[str, str, str] | None:
     return f"https://github.com/{owner}/{repo}", branch, path
 
 
-def load_public_skills(marketplace: str = DEFAULT_MARKETPLACE) -> list[Skill]:
+def load_public_skills(
+    marketplace: str | None = None,
+    *,
+    repo_url: str | None = None,
+    branch: str | None = None,
+) -> list[Skill]:
     """Load skills from a marketplace.
 
     The marketplace can contain:
@@ -885,11 +890,45 @@ def load_public_skills(marketplace: str = DEFAULT_MARKETPLACE) -> list[Skill]:
             - Local path: "/path/to/repo/marketplaces/default.json"
             - Relative path: "./marketplaces/default.json"
             - Raw GitHub URL: "https://raw.githubusercontent.com/.../marketplace.json"
+        repo_url: Deprecated. Use marketplace parameter instead.
+        branch: Deprecated. Use marketplace parameter instead.
 
     Returns:
         List of Skill objects.
     """
     from openhands.sdk.plugin import Marketplace
+    from openhands.sdk.utils.deprecation import warn_deprecated
+
+    # Handle deprecated repo_url/branch parameters
+    if repo_url is not None or branch is not None:
+        warn_deprecated(
+            "load_public_skills(repo_url, branch)",
+            deprecated_in="1.12.0",
+            removed_in="1.14.0",
+            details="Use marketplace parameter with a URL or local path instead.",
+        )
+        # Convert old API to new: construct marketplace URL from repo_url/branch
+        default_repo = "https://github.com/OpenHands/extensions"
+        default_branch = "main"
+        repo = repo_url or default_repo
+        br = branch or default_branch
+        # Extract owner/repo from URL
+        if "github.com" in repo:
+            parts = repo.rstrip("/").split("/")
+            owner, repo_name = parts[-2], parts[-1]
+            if repo_name.endswith(".git"):
+                repo_name = repo_name[:-4]
+            marketplace = (
+                f"https://raw.githubusercontent.com/{owner}/{repo_name}"
+                f"/{br}/marketplaces/default.json"
+            )
+        else:
+            # For non-GitHub URLs, we can't easily convert
+            logger.warning(f"Cannot convert non-GitHub repo_url to marketplace: {repo}")
+            marketplace = DEFAULT_MARKETPLACE
+
+    if marketplace is None:
+        marketplace = DEFAULT_MARKETPLACE
 
     all_skills: list[Skill] = []
 
