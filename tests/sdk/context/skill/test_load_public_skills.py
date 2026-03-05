@@ -53,13 +53,14 @@ def mock_repo_dir(tmp_path):
         "---\nname: testing\n---\nTesting guidelines for all repos."
     )
 
-    # Create marketplace
+    # Create marketplace using skills[] (OpenHands extension)
     marketplaces_dir = repo_dir / "marketplaces"
     marketplaces_dir.mkdir()
     marketplace = {
         "name": "default",
         "owner": {"name": "Test", "email": "test@test.com"},
-        "plugins": [
+        "metadata": {"skillRoot": "./skills"},
+        "skills": [
             {"name": "git", "source": "./git"},
             {"name": "docker", "source": "./docker"},
             {"name": "testing", "source": "./testing"},
@@ -153,9 +154,9 @@ def mock_repo_with_agentskills_references(tmp_path):
         "name": "default",
         "owner": {"name": "Test", "email": "test@test.com"},
         "plugins": [
-            {"name": "theme-factory", "source": "./theme-factory"},
-            {"name": "readiness-report", "source": "./readiness-report"},
-            {"name": "legacy-skill", "source": "./legacy-skill"},
+            {"name": "theme-factory", "source": "./skills/theme-factory"},
+            {"name": "readiness-report", "source": "./skills/readiness-report"},
+            {"name": "legacy-skill", "source": "./skills/legacy-skill"},
         ],
     }
     (marketplaces_dir / "default.json").write_text(json.dumps(marketplace))
@@ -255,8 +256,8 @@ def test_load_public_skills_with_invalid_skill(tmp_path):
         "name": "default",
         "owner": {"name": "Test", "email": "test@test.com"},
         "plugins": [
-            {"name": "valid", "source": "./valid"},
-            {"name": "invalid", "source": "./invalid"},
+            {"name": "valid", "source": "./skills/valid"},
+            {"name": "invalid", "source": "./skills/invalid"},
         ],
     }
     marketplace_file = marketplaces_dir / "default.json"
@@ -556,8 +557,12 @@ def mock_repo_with_marketplace(tmp_path):
         "owner": {"name": "OpenHands", "email": "test@test.com"},
         "metadata": {"description": "Test marketplace", "version": "1.0.0"},
         "plugins": [
-            {"name": "git", "source": "./git", "description": "Git skill"},
-            {"name": "docker", "source": "./docker", "description": "Docker skill"},
+            {"name": "git", "source": "./skills/git", "description": "Git skill"},
+            {
+                "name": "docker",
+                "source": "./skills/docker",
+                "description": "Docker skill",
+            },
         ],
     }
     (marketplaces_dir / "default.json").write_text(json.dumps(marketplace))
@@ -639,8 +644,8 @@ def test_load_public_skills_handles_skills_with_marketplace(tmp_path):
         "name": "default",
         "owner": {"name": "Test Team"},
         "plugins": [
-            {"name": "git", "source": "./git"},
-            {"name": "docker", "source": "./docker"},
+            {"name": "git", "source": "./skills/git"},
+            {"name": "docker", "source": "./skills/docker"},
         ],
     }
     marketplace_file = marketplaces_dir / "default.json"
@@ -678,8 +683,8 @@ def test_load_public_skills_with_custom_marketplace(tmp_path):
         "name": "default",
         "owner": {"name": "OpenHands", "email": "test@test.com"},
         "plugins": [
-            {"name": "git", "source": "./git"},
-            {"name": "docker", "source": "./docker"},
+            {"name": "git", "source": "./skills/git"},
+            {"name": "docker", "source": "./skills/docker"},
         ],
     }
     default_file = marketplaces_dir / "default.json"
@@ -690,10 +695,10 @@ def test_load_public_skills_with_custom_marketplace(tmp_path):
         "name": "custom",
         "owner": {"name": "OpenHands", "email": "test@test.com"},
         "plugins": [
-            {"name": "git", "source": "./git"},
-            {"name": "docker", "source": "./docker"},
-            {"name": "internal-only", "source": "./internal-only"},
-            {"name": "experimental", "source": "./experimental"},
+            {"name": "git", "source": "./skills/git"},
+            {"name": "docker", "source": "./skills/docker"},
+            {"name": "internal-only", "source": "./skills/internal-only"},
+            {"name": "experimental", "source": "./skills/experimental"},
         ],
     }
     custom_file = marketplaces_dir / "custom.json"
@@ -732,8 +737,8 @@ def test_load_public_skills_from_local_path(tmp_path):
         "name": "default",
         "owner": {"name": "Test", "email": "test@test.com"},
         "plugins": [
-            {"name": "git", "source": "./git"},
-            {"name": "docker", "source": "./docker"},
+            {"name": "git", "source": "./skills/git"},
+            {"name": "docker", "source": "./skills/docker"},
         ],
     }
     marketplace_file = marketplaces_dir / "default.json"
@@ -767,8 +772,8 @@ def test_load_public_skills_from_relative_path(tmp_path, monkeypatch):
         "name": "default",
         "owner": {"name": "Test", "email": "test@test.com"},
         "plugins": [
-            {"name": "git", "source": "./git"},
-            {"name": "docker", "source": "./docker"},
+            {"name": "git", "source": "./skills/git"},
+            {"name": "docker", "source": "./skills/docker"},
         ],
     }
     marketplace_file = marketplaces_dir / "default.json"

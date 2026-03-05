@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 import io
 import json
 import re
 from pathlib import Path
-from typing import Annotated, ClassVar, Literal, Union
+from typing import Annotated, ClassVar, Literal
 from xml.sax.saxutils import escape as xml_escape
 
 import frontmatter
@@ -262,7 +264,7 @@ class Skill(BaseModel):
         path: str | Path,
         skill_base_dir: Path | None = None,
         strict: bool = True,
-    ) -> "Skill":
+    ) -> Skill:
         """Load a skill from a markdown file with frontmatter.
 
         The agent's name is derived from its path relative to skill_base_dir,
@@ -290,7 +292,7 @@ class Skill(BaseModel):
     @classmethod
     def _load_agentskills_skill(
         cls, path: Path, file_content: str, strict: bool = True
-    ) -> "Skill":
+    ) -> Skill:
         """Load a skill from an AgentSkills-format SKILL.md file.
 
         Args:
@@ -343,7 +345,7 @@ class Skill(BaseModel):
     @classmethod
     def _load_legacy_openhands_skill(
         cls, path: Path, file_content: str, skill_base_dir: Path | None
-    ) -> "Skill":
+    ) -> Skill:
         """Load a skill from a legacy OpenHands-format file.
 
         Args:
@@ -391,7 +393,7 @@ class Skill(BaseModel):
         mcp_tools: dict | None = None,
         resources: SkillResources | None = None,
         is_agentskills_format: bool = False,
-    ) -> "Skill":
+    ) -> Skill:
         """Create a Skill object from parsed metadata.
 
         Args:
@@ -477,7 +479,7 @@ class Skill(BaseModel):
             )
 
     @classmethod
-    def _handle_third_party(cls, path: Path, file_content: str) -> Union["Skill", None]:
+    def _handle_third_party(cls, path: Path, file_content: str) -> Skill | None:
         """Handle third-party skill files (e.g., .cursorrules, AGENTS.md).
 
         Creates a Skill with None trigger (always active) if the file type
@@ -873,6 +875,11 @@ def _parse_raw_github_url(url: str) -> tuple[str, str, str] | None:
 def load_public_skills(marketplace: str = DEFAULT_MARKETPLACE) -> list[Skill]:
     """Load skills from a marketplace.
 
+    The marketplace can contain:
+    - `skills[]`: Direct skill entries (OpenHands extension)
+    - `plugins[]`: Plugin entries (Claude Code compatible) - we look for skills
+      inside each plugin's directory
+
     Args:
         marketplace: URL or local path to a marketplace.json file.
             - Local path: "/path/to/repo/marketplaces/default.json"
@@ -930,7 +937,7 @@ def load_public_skills(marketplace: str = DEFAULT_MARKETPLACE) -> list[Skill]:
                 return all_skills
             base_dir = repo_path
         else:
-            # Other URL - just fetch the JSON (skills must be remote too)
+            # Other URL - just fetch the JSON (skills must have remote sources)
             try:
                 import urllib.request
 
@@ -941,32 +948,128 @@ def load_public_skills(marketplace: str = DEFAULT_MARKETPLACE) -> list[Skill]:
                 return all_skills
             base_dir = None
 
-    # Parse marketplace to get skill names
-    # Note: We use the Claude Code plugin marketplace schema for compatibility.
-    # The `source` field is required by the schema but we only use `name` to
-    # identify which skills to load from skills/{name}/SKILL.md
+    # Parse marketplace
     try:
         mp = Marketplace.model_validate({**data, "path": str(base_dir or "")})
     except Exception as e:
         logger.warning(f"Invalid marketplace: {e}")
         return all_skills
 
-    if base_dir is None:
-        logger.warning("Cannot load skills without a base directory")
-        return all_skills
+    cache_dir = get_skills_cache_dir()
 
-    skills_dir = base_dir / "skills"
-    if not skills_dir.exists():
-        logger.warning(f"Skills directory not found: {skills_dir}")
-        return all_skills
+    # Load skills from the `skills` array (OpenHands extension)
+    for skill_entry in mp.skills:
+        skill = _load_skill_from_source(
+            skill_entry.name,
+            skill_entry.source,
+            mp,
+            base_dir,
+            cache_dir,
+            use_skill_root=True,
+        )
+        if skill:
+            all_skills.append(skill)
 
+    # Load skills from the `plugins` array (Claude Code compatible)
+    # For plugins, we look for SKILL.md in the plugin directory
     for plugin in mp.plugins:
-        skill = _load_skill_by_name(skills_dir, plugin.name, base_dir)
+        skill = _load_skill_from_source(
+            plugin.name,
+            plugin.source,
+            mp,
+            base_dir,
+            cache_dir,
+            use_skill_root=False,
+        )
         if skill:
             all_skills.append(skill)
 
     logger.info(f"Loaded {len(all_skills)} skills from {marketplace}")
     return all_skills
+
+
+def _load_skill_from_source(
+    name: str,
+    source: object,  # str | MarketplacePluginSource
+    mp: object,  # Marketplace
+    base_dir: Path | None,
+    cache_dir: Path,
+    use_skill_root: bool,
+) -> Skill | None:
+    """Load a skill from a source specification.
+
+    Args:
+        name: Skill/plugin name for logging
+        source: Source path (str) or MarketplacePluginSource object
+        mp: Marketplace instance for resolving relative paths
+        base_dir: Base directory for local paths (None for URL-only marketplaces)
+        cache_dir: Cache directory for cloning remote repos
+        use_skill_root: If True, apply skillRoot; if False, apply pluginRoot
+
+    Returns:
+        Loaded Skill or None if loading fails.
+    """
+    from openhands.sdk.plugin import Marketplace, MarketplacePluginSource
+
+    assert isinstance(mp, Marketplace)
+
+    # Handle remote sources (GitHub, git URL)
+    if isinstance(source, MarketplacePluginSource):
+        if source.source == "github" and source.repo:
+            url = f"https://github.com/{source.repo}"
+        elif source.source == "url" and source.url:
+            url = source.url
+        else:
+            logger.warning(f"Invalid source for '{name}': {source.source}")
+            return None
+
+        repo = update_skills_repository(url, source.ref or "main", cache_dir)
+        if not repo:
+            logger.warning(f"Failed to clone repo for '{name}': {url}")
+            return None
+
+        # Use source.path if specified, otherwise look for SKILL.md at root
+        if source.path:
+            skill_dir = repo / source.path
+        else:
+            skill_dir = repo
+        skill_base = skill_dir.parent if skill_dir.name != repo.name else repo
+    else:
+        # Local path - source must be a string
+        assert isinstance(source, str)
+        if base_dir is None:
+            logger.warning(f"Cannot load local skill '{name}' without base directory")
+            return None
+
+        # Apply root prefix if configured
+        resolved_source = source
+        if use_skill_root and mp.metadata and mp.metadata.skill_root:
+            root = mp.metadata.skill_root.rstrip("/")
+            resolved_source = f"{root}/{source.lstrip('./')}"
+        elif not use_skill_root and mp.metadata and mp.metadata.plugin_root:
+            root = mp.metadata.plugin_root.rstrip("/")
+            resolved_source = f"{root}/{source.lstrip('./')}"
+
+        skill_dir = base_dir / resolved_source.lstrip("./")
+        skill_base = skill_dir.parent
+
+    # Load skill from directory
+    skill_md = skill_dir / "SKILL.md"
+    if not skill_md.exists():
+        # Try as a direct .md file
+        skill_md = skill_dir.with_suffix(".md")
+    if skill_md.exists():
+        try:
+            skill = Skill.load(path=skill_md, skill_base_dir=skill_base)
+            if skill:
+                logger.debug(f"Loaded skill: {skill.name}")
+                return skill
+        except Exception as e:
+            logger.warning(f"Failed to load skill '{name}': {e}")
+    else:
+        logger.debug(f"Skill '{name}' not found at {skill_dir}")
+
+    return None
 
 
 def _load_skill_by_name(

@@ -20,6 +20,7 @@ from openhands.sdk.plugin.types import (
     MarketplaceOwner,
     MarketplacePluginEntry,
     MarketplacePluginSource,
+    MarketplaceSkillEntry,
     PluginAuthor,
     PluginManifest,
     PluginSource,
@@ -44,5 +45,6 @@ __all__ = [
     "MarketplaceOwner",
     "MarketplacePluginEntry",
     "MarketplacePluginSource",
+    "MarketplaceSkillEntry",
     "MarketplaceMetadata",
 ]

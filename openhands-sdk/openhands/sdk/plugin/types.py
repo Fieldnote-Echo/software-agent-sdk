@@ -494,6 +494,48 @@ class MarketplacePluginEntry(BaseModel):
         )
 
 
+class MarketplaceSkillEntry(BaseModel):
+    """Skill entry in a marketplace (OpenHands extension).
+
+    This extends the Claude Code marketplace format to support listing
+    individual skills directly, not just plugins. Skills are SKILL.md files
+    that provide agent capabilities without the full plugin structure.
+
+    Example:
+        ```json
+        {
+            "name": "github",
+            "source": "./skills/github",
+            "description": "GitHub integration skill"
+        }
+        ```
+    """
+
+    name: str = Field(
+        description="Skill identifier. Used to reference the skill and as "
+        "the directory name under skills/ if source is not specified."
+    )
+    source: str | MarketplacePluginSource = Field(
+        description="Where to find the skill. Can be a relative path string "
+        "(e.g., './skills/github') or a source object for GitHub/git URLs"
+    )
+    description: str | None = Field(default=None, description="Brief skill description")
+    keywords: list[str] = Field(
+        default_factory=list,
+        description="Tags for skill discovery and categorization",
+    )
+
+    model_config = {"extra": "allow"}
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def _parse_source(cls, v: Any) -> Any:
+        """Parse source dict to MarketplacePluginSource if needed."""
+        if isinstance(v, dict):
+            return MarketplacePluginSource.model_validate(v)
+        return v
+
+
 class MarketplaceMetadata(BaseModel):
     """Optional metadata for a marketplace."""
 
@@ -508,16 +550,25 @@ class MarketplaceMetadata(BaseModel):
         "E.g., './plugins' allows writing 'source: formatter' "
         "instead of 'source: ./plugins/formatter'",
     )
+    skill_root: str | None = Field(
+        default=None,
+        alias="skillRoot",
+        description="Base directory prepended to relative skill source paths. "
+        "E.g., './skills' allows writing 'source: github' "
+        "instead of 'source: ./skills/github'",
+    )
 
     model_config = {"extra": "allow", "populate_by_name": True}
 
 
 class Marketplace(BaseModel):
-    """A plugin marketplace that lists available plugins.
+    """A marketplace that lists available plugins and skills.
 
-    Marketplaces follow the Claude Code marketplace structure for compatibility.
+    Marketplaces follow the Claude Code marketplace structure for compatibility,
+    with an OpenHands extension for listing individual skills.
+
     The marketplace.json file is located in `.plugin/` or `.claude-plugin/`
-    directory at the root of the marketplace repository.
+    directory, or in a `marketplaces/` directory.
 
     Example marketplace.json:
     ```json
@@ -530,20 +581,21 @@ class Marketplace(BaseModel):
         "description": "Internal development tools",
         "metadata": {
             "version": "1.0.0",
-            "pluginRoot": "./plugins"
+            "pluginRoot": "./plugins",
+            "skillRoot": "./skills"
         },
         "plugins": [
             {
                 "name": "code-formatter",
                 "source": "./plugins/formatter",
                 "description": "Automatic code formatting"
-            },
+            }
+        ],
+        "skills": [
             {
-                "name": "deployment-tools",
-                "source": {
-                    "source": "github",
-                    "repo": "company/deploy-plugin"
-                }
+                "name": "github",
+                "source": "./skills/github",
+                "description": "GitHub integration"
             }
         ]
     }
@@ -561,6 +613,11 @@ class Marketplace(BaseModel):
     )
     plugins: list[MarketplacePluginEntry] = Field(
         default_factory=list, description="List of available plugins"
+    )
+    skills: list[MarketplaceSkillEntry] = Field(
+        default_factory=list,
+        description="List of available skills (OpenHands extension). "
+        "Skills are individual SKILL.md files, not full plugins.",
     )
     metadata: MarketplaceMetadata | None = Field(
         default=None, description="Optional marketplace metadata"
@@ -673,6 +730,68 @@ class Marketplace(BaseModel):
         if self.metadata and self.metadata.plugin_root:
             plugin_root = self.metadata.plugin_root.rstrip("/")
             source = f"{plugin_root}/{source.lstrip('./')}"
+
+        # Resolve relative paths to absolute if we know the marketplace path
+        if self.path and not source.startswith(("/", "~")):
+            source = str(Path(self.path) / source.lstrip("./"))
+
+        return (source, None, None)
+
+    def get_skill(self, name: str) -> MarketplaceSkillEntry | None:
+        """Get a skill entry by name.
+
+        Args:
+            name: Skill name to look up.
+
+        Returns:
+            MarketplaceSkillEntry if found, None otherwise.
+        """
+        for skill in self.skills:
+            if skill.name == name:
+                return skill
+        return None
+
+    def resolve_skill_source(
+        self, skill: MarketplaceSkillEntry
+    ) -> tuple[str, str | None, str | None]:
+        """Resolve a skill's source to a full path or URL.
+
+        Handles relative paths and skill_root from metadata.
+
+        Args:
+            skill: Skill entry to resolve source for.
+
+        Returns:
+            Tuple of (source, ref, subpath) where:
+            - source: Resolved source string (path or URL)
+            - ref: Branch, tag, or commit reference (None for local paths)
+            - subpath: Subdirectory path within the repo (None if not specified)
+
+        Raises:
+            ValueError: If source object is invalid.
+        """
+        source = skill.source
+
+        # Handle complex source objects (GitHub, git URLs)
+        if isinstance(source, MarketplacePluginSource):
+            if source.source == "github" and source.repo:
+                return (f"github:{source.repo}", source.ref, source.path)
+            if source.source == "url" and source.url:
+                return (source.url, source.ref, source.path)
+            raise ValueError(
+                f"Invalid skill source for '{skill.name}': "
+                f"source type '{source.source}' is missing required field. "
+                f"'github' sources require 'repo', 'url' sources require 'url'"
+            )
+
+        # Source is a string path - check if it's absolute or a URL
+        if source.startswith(("/", "~")) or "://" in source:
+            return (source, None, None)
+
+        # Relative path: apply skill_root if configured
+        if self.metadata and self.metadata.skill_root:
+            skill_root = self.metadata.skill_root.rstrip("/")
+            source = f"{skill_root}/{source.lstrip('./')}"
 
         # Resolve relative paths to absolute if we know the marketplace path
         if self.path and not source.startswith(("/", "~")):
