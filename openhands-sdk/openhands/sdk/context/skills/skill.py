@@ -882,7 +882,7 @@ def load_public_skills(marketplace: str = DEFAULT_MARKETPLACE) -> list[Skill]:
     Returns:
         List of Skill objects.
     """
-    from openhands.sdk.plugin import Marketplace, MarketplacePluginSource
+    from openhands.sdk.plugin import Marketplace
 
     all_skills: list[Skill] = []
 
@@ -941,63 +941,29 @@ def load_public_skills(marketplace: str = DEFAULT_MARKETPLACE) -> list[Skill]:
                 return all_skills
             base_dir = None
 
-    # Parse marketplace
+    # Parse marketplace to get skill names
+    # Note: We use the Claude Code plugin marketplace schema for compatibility.
+    # The `source` field is required by the schema but we only use `name` to
+    # identify which skills to load from skills/{name}/SKILL.md
     try:
         mp = Marketplace.model_validate({**data, "path": str(base_dir or "")})
     except Exception as e:
         logger.warning(f"Invalid marketplace: {e}")
         return all_skills
 
-    cache_dir = get_skills_cache_dir()
+    if base_dir is None:
+        logger.warning("Cannot load skills without a base directory")
+        return all_skills
+
+    skills_dir = base_dir / "skills"
+    if not skills_dir.exists():
+        logger.warning(f"Skills directory not found: {skills_dir}")
+        return all_skills
 
     for plugin in mp.plugins:
-        source = plugin.source
-
-        if isinstance(source, str):
-            # Local path relative to marketplace
-            if base_dir is None:
-                logger.warning(
-                    f"Cannot load local skill '{plugin.name}' from remote marketplace"
-                )
-                continue
-            name = source[2:] if source.startswith("./") else source
-            skill_dir = base_dir / "skills" / name
-        elif isinstance(source, MarketplacePluginSource):
-            # Remote repo
-            if source.source == "github" and source.repo:
-                url = f"https://github.com/{source.repo}"
-            elif source.source == "url" and source.url:
-                url = source.url
-            else:
-                logger.warning(
-                    f"Invalid source for skill '{plugin.name}': {source.source}"
-                )
-                continue
-            repo = update_skills_repository(url, source.ref or "main", cache_dir)
-            if not repo:
-                logger.warning(f"Failed to clone repo for skill '{plugin.name}': {url}")
-                continue
-            skill_dir = repo / (source.path or f"skills/{plugin.name}")
-        else:
-            logger.warning(
-                f"Unknown source type for skill '{plugin.name}': {type(source)}"
-            )
-            continue
-
-        # Load skill from directory
-        skill_md = skill_dir / "SKILL.md"
-        if not skill_md.exists():
-            skill_md = skill_dir.with_suffix(".md")
-        if skill_md.exists():
-            try:
-                skill = Skill.load(path=skill_md, skill_base_dir=skill_dir.parent)
-                if skill:
-                    all_skills.append(skill)
-                    logger.debug(f"Loaded skill: {skill.name}")
-            except Exception as e:
-                logger.warning(f"Failed to load skill '{plugin.name}': {e}")
-        else:
-            logger.debug(f"Skill '{plugin.name}' not found at {skill_dir}")
+        skill = _load_skill_by_name(skills_dir, plugin.name, base_dir)
+        if skill:
+            all_skills.append(skill)
 
     logger.info(f"Loaded {len(all_skills)} skills from {marketplace}")
     return all_skills
