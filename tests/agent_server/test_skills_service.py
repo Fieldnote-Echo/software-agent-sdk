@@ -1,7 +1,6 @@
 """Tests for skills service."""
 
 import tempfile
-from pathlib import Path
 from unittest.mock import patch
 
 from openhands.agent_server.skills_service import (
@@ -343,53 +342,17 @@ class TestLoadAllSkills:
 class TestSyncPublicSkills:
     """Tests for sync_public_skills function."""
 
-    def test_sync_public_skills_success(self):
-        """Test successful skill sync."""
-        with (
-            patch(
-                "openhands.agent_server.skills_service.get_skills_cache_dir"
-            ) as mock_cache,
-            patch(
-                "openhands.agent_server.skills_service.update_skills_repository"
-            ) as mock_update,
-        ):
-            mock_cache.return_value = Path("/tmp/cache")
-            mock_update.return_value = Path("/tmp/cache/public-skills")
+    def test_sync_public_skills_local(self):
+        """Test sync with local marketplace path."""
+        success, message = sync_public_skills("/path/to/marketplace.json")
+        assert success is True
+        assert "local" in message.lower()
 
-            success, message = sync_public_skills()
-
-            assert success is True
-            assert "success" in message.lower()
-
-    def test_sync_public_skills_failure(self):
-        """Test failed skill sync."""
-        with (
-            patch(
-                "openhands.agent_server.skills_service.get_skills_cache_dir"
-            ) as mock_cache,
-            patch(
-                "openhands.agent_server.skills_service.update_skills_repository"
-            ) as mock_update,
-        ):
-            mock_cache.return_value = Path("/tmp/cache")
-            mock_update.return_value = None
-
-            success, message = sync_public_skills()
-
-            assert success is False
-            assert "failed" in message.lower()
-
-    def test_sync_public_skills_exception(self):
-        """Test skill sync with exception."""
-        with patch(
-            "openhands.agent_server.skills_service.get_skills_cache_dir"
-        ) as mock_cache:
-            mock_cache.side_effect = Exception("Permission denied")
-
-            success, message = sync_public_skills()
-
-            assert success is False
-            assert "failed" in message.lower() or "error" in message.lower()
+    def test_sync_public_skills_remote(self):
+        """Test sync with remote marketplace URL."""
+        success, message = sync_public_skills("https://example.com/marketplace.json")
+        assert success is True
+        assert "remote" in message.lower() or "demand" in message.lower()
 
 
 class TestSkillLoadResult:
