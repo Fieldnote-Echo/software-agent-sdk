@@ -369,8 +369,7 @@ def sync_public_skills(marketplace: str = DEFAULT_MARKETPLACE) -> tuple[bool, st
     Returns:
         Tuple of (success: bool, message: str).
     """
-    # With the new design, skills are loaded on-demand from the marketplace
-    # No separate sync step is needed
+    # Skills are loaded on-demand, no separate sync step needed
     if marketplace.startswith(("/", "file://")):
         return (True, "Local marketplace - no sync needed")
     return (True, "Remote marketplace - skills loaded on demand")
