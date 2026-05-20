@@ -811,8 +811,17 @@ def build_with_telemetry(opts: BuildOptions) -> BuildResult:
     # so use an empty temp dir instead of running the expensive uv build --sdist.
     is_base_only = opts.target in ("base-image-minimal", "base-image")
     if is_base_only:
+        # Base targets skip the expensive sdist build, but the Dockerfile still
+        # COPYs the pinned ACP CLI manifest + lockfile from the build context.
+        # Seed a minimal context with just those two files at their in-repo path
+        # so the base-image and base-image-minimal targets build standalone.
         ctx = Path(tempfile.mkdtemp(prefix="agent-base-ctx-"))
         shutil.copy2(dockerfile_path, ctx / "Dockerfile")
+        acp_src = dockerfile_path.parent / "acp"
+        acp_dst = ctx / "openhands-agent-server/openhands/agent_server/docker/acp"
+        acp_dst.mkdir(parents=True, exist_ok=True)
+        for _acp_file in ("package.json", "package-lock.json"):
+            shutil.copy2(acp_src / _acp_file, acp_dst / _acp_file)
     else:
         ctx = _make_build_context(opts.sdk_project_root, opts.prebuilt_sdist)
     telemetry.build_context_seconds = _round_seconds(
