@@ -175,7 +175,7 @@ RUN set -ux; \
          && tar -xJ --strip-components=1 -C "$ACP_NODE_DIR" -f "$NODE_TARBALL" \
          && "$ACP_NODE_DIR/bin/node" --version; then \
         PATH="$ACP_NODE_DIR/bin:$PATH"; \
-        if (cd "$ACP_DEPS_DIR" && "$ACP_NODE_DIR/bin/npm" ci --omit=dev --no-audit --no-fund); then \
+        if (cd "$ACP_DEPS_DIR" && "$ACP_NODE_DIR/bin/npm" ci --ignore-scripts --omit=dev --no-audit --no-fund); then \
           # Create wrappers in /usr/local/bin that prepend ACP's Node 22 to PATH.
           # This ensures the ACP binary's #!/usr/bin/env node shebang resolves
           # to Node 22, while the repo's own node (NVM/system) stays untouched

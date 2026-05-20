@@ -4,8 +4,8 @@
   "private": true,
   "description": "Pinned ACP agent CLIs installed into the agent-server image. The committed package-lock.json pins the full transitive tree with integrity hashes. Regenerate with: npm install --package-lock-only",
   "dependencies": {
-    "@agentclientprotocol/claude-agent-acp": "0.30.0",
+    "@agentclientprotocol/claude-agent-acp": "0.36.1",
     "@zed-industries/codex-acp": "0.11.1",
-    "@google/gemini-cli": "0.38.0"
+    "@google/gemini-cli": "0.42.0"
   }
 }
