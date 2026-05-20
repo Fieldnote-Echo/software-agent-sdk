@@ -151,6 +151,11 @@ RUN set -eux; \
 # 22 glibc tarball. When that happens we leave $ACP_NODE_DIR empty and skip
 # ACP setup so the rest of the build (and non-ACP agents) still work.
 ENV ACP_NODE_DIR=/opt/acp-node
+ENV ACP_DEPS_DIR=/opt/acp-deps
+# Pinned ACP CLI dependency manifest + lockfile (full transitive tree with
+# integrity hashes), installed via `npm ci` below instead of a floating
+# `npm install -g`. Regenerate with: npm install --package-lock-only.
+COPY openhands-agent-server/openhands/agent_server/docker/acp/package.json openhands-agent-server/openhands/agent_server/docker/acp/package-lock.json /opt/acp-deps/
 RUN set -ux; \
     mkdir -p "$ACP_NODE_DIR"; \
     ARCH=$(uname -m); \
@@ -170,18 +175,15 @@ RUN set -ux; \
          && tar -xJ --strip-components=1 -C "$ACP_NODE_DIR" -f "$NODE_TARBALL" \
          && "$ACP_NODE_DIR/bin/node" --version; then \
         PATH="$ACP_NODE_DIR/bin:$PATH"; \
-        if "$ACP_NODE_DIR/bin/npm" install -g \
-            @agentclientprotocol/claude-agent-acp@0.30.0 \
-            @zed-industries/codex-acp@0.11.1 \
-            @google/gemini-cli@0.38.0; then \
+        if (cd "$ACP_DEPS_DIR" && "$ACP_NODE_DIR/bin/npm" ci --omit=dev --no-audit --no-fund); then \
           # Create wrappers in /usr/local/bin that prepend ACP's Node 22 to PATH.
           # This ensures the ACP binary's #!/usr/bin/env node shebang resolves
           # to Node 22, while the repo's own node (NVM/system) stays untouched
-          # for tests.
+          # for tests. Bins come from the lockfile-pinned local install.
           for bin in claude-agent-acp codex-acp gemini; do \
-            if [ -e "$ACP_NODE_DIR/bin/$bin" ]; then \
-              printf '#!/bin/sh\nPATH="%s/bin:$PATH" exec "%s/bin/%s" "$@"\n' \
-                "$ACP_NODE_DIR" "$ACP_NODE_DIR" "$bin" \
+            if [ -e "$ACP_DEPS_DIR/node_modules/.bin/$bin" ]; then \
+              printf '#!/bin/sh\nPATH="%s/bin:$PATH" exec "%s/node_modules/.bin/%s" "$@"\n' \
+                "$ACP_NODE_DIR" "$ACP_DEPS_DIR" "$bin" \
                 > /usr/local/bin/"$bin"; \
               chmod +x /usr/local/bin/"$bin"; \
             fi; \
