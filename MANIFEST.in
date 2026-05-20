@@ -40,6 +40,8 @@ recursive-include openhands-agent-server py.typed
 # Docker build files
 include openhands-agent-server/openhands/agent_server/docker/Dockerfile
 include openhands-agent-server/openhands/agent_server/docker/wallpaper.svg
+include openhands-agent-server/openhands/agent_server/docker/acp/package.json
+include openhands-agent-server/openhands/agent_server/docker/acp/package-lock.json
 
 # PyInstaller spec
 include openhands-agent-server/openhands/agent_server/agent-server.spec
