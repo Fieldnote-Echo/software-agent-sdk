@@ -119,8 +119,17 @@ DEFAULT_INJECTION_HIGH_PATTERNS: list[tuple[str, str, str]] = [
 ]
 
 DEFAULT_INJECTION_MEDIUM_PATTERNS: list[tuple[str, str, str]] = [
+    # Jailbreak persona-mode invocations. The modifier allowlist tracks
+    # documented jailbreak modes (OWASP LLM01:2025 Prompt Injection; public
+    # DAN/jailbreak persona taxonomy). The previous `(?:\w+\s+)?` wildcard
+    # fired on benign phrases ("safe mode", "dark mode"). Personas invoked via
+    # "act as <X>" (AIM, STAN, DUDE) are out of scope for this "<X> mode" form.
     (
-        r"\byou\s+are\s+now\s+(?:in\s+)?(?:\w+\s+)?mode\b",
+        r"\byou\s+are\s+now\s+(?:in\s+)?"
+        r"(?:DAN|jailbreak|jailbroken|developer|debug|unrestricted|unfiltered"
+        r"|unlimited|uncensored|evil|maximum|god|hacker|sudo|admin|root"
+        r"|do\s+anything"
+        r"|no\s+restrictions?)\s+mode\b",
         "Mode switching attempt",
         DET_INJECT_MODE_SWITCH,
     ),
