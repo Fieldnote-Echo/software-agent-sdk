@@ -50,6 +50,8 @@ DET_EXEC_NET_CURL_EXEC = "exec.net.curl_pipe_exec"
 DET_EXEC_NET_WGET_EXEC = "exec.net.wget_pipe_exec"
 DET_EXEC_NET_CURL = "exec.net.curl"
 DET_EXEC_NET_WGET = "exec.net.wget"
+DET_EXEC_PRIV_SUDO_SHELL = "exec.priv.sudo_shell"
+DET_EXEC_PRIV_PKEXEC_SHELL = "exec.priv.pkexec_shell"
 DET_INJECT_OVERRIDE = "inject.override"
 DET_INJECT_MODE_SWITCH = "inject.mode_switch"
 DET_INJECT_IDENTITY = "inject.identity"
@@ -104,6 +106,29 @@ DEFAULT_MEDIUM_PATTERNS: list[tuple[str, str, str]] = [
     # Network access without invocation pipe
     (r"\bcurl\b.{0,100}https?://", "HTTP request via curl", DET_EXEC_NET_CURL),
     (r"\bwget\b.{0,100}https?://", "Download via wget", DET_EXEC_NET_WGET),
+    # Privilege escalation to an interactive shell. The HIGH
+    # exec.destruct.sudo_rm detector flags `sudo rm`, but `sudo bash` /
+    # `sudo /bin/bash` / `sudo su` / `pkexec /bin/sh` otherwise classify LOW.
+    # MEDIUM is advisory (surfaced for review or configurable confirmation,
+    # not the destructive-HIGH path): root-shell escalation is often legitimate.
+    #
+    # Matches sudo/pkexec DIRECTLY followed by a shell (optional path); no
+    # flag-skip. The exec corpus space-joins separate field segments, so a
+    # `sudo <flags> <shell>` skip would bridge unrelated fields into a false
+    # match. Flag-separated forms (`sudo -u root bash`) and field-boundary-safe
+    # parsing are deferred to the tree-sitter migration. A bare sudo|shell
+    # adjacency across one join can still match -- a flat-corpus limit shared
+    # with exec.destruct.sudo_rm, resolved structurally by that work.
+    (
+        r"\bsudo\s+(?:(?:/[\w/]+/)?(?:bash|zsh|ksh|dash|fish|sh|su)|-i|-s)(?![\w./-])",
+        "Privilege escalation to shell (sudo)",
+        DET_EXEC_PRIV_SUDO_SHELL,
+    ),
+    (
+        r"\bpkexec\s+(?:/[\w/]+/)?(?:bash|zsh|ksh|dash|fish|sh|su)(?![\w./-])",
+        "Privilege escalation to shell (pkexec)",
+        DET_EXEC_PRIV_PKEXEC_SHELL,
+    ),
 ]
 
 # Injection patterns: scanned against ALL fields (invocation + reasoning).
