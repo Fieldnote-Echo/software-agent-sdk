@@ -29,6 +29,8 @@ DEFAULT_LOCK_TIMEOUT = 30
 
 # Matches a full 40-character git commit SHA (lowercase hex)
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_HEAD_REF_PREFIX = "refs/heads/"
+_TAG_REF_PREFIX = "refs/tags/"
 
 
 def _checkout_error(ref: str, error: GitCommandError) -> GitCommandError:
@@ -38,6 +40,45 @@ def _checkout_error(ref: str, error: GitCommandError) -> GitCommandError:
         exit_code=error.exit_code,
         stderr=error.stderr,
     )
+
+
+def _match_ref_pattern(pattern: str, ref: str) -> str | None:
+    if "*" not in pattern:
+        return "" if pattern == ref else None
+    if pattern.count("*") != 1:
+        return None
+
+    prefix, suffix = pattern.split("*")
+    if not ref.startswith(prefix) or not ref.endswith(suffix):
+        return None
+    end = len(ref) - len(suffix) if suffix else len(ref)
+    if end < len(prefix):
+        return None
+    return ref[len(prefix) : end]
+
+
+def _refspec_maps_branch(refspec: str, branch: str) -> bool:
+    refspec = refspec.removeprefix("+")
+    if refspec.startswith("^"):
+        return False
+
+    source_pattern, separator, destination_pattern = refspec.partition(":")
+    if not separator:
+        return False
+    source_ref = f"{_HEAD_REF_PREFIX}{branch}"
+    wildcard = _match_ref_pattern(source_pattern, source_ref)
+    if wildcard is None:
+        return False
+    destination = destination_pattern.replace("*", wildcard)
+    return destination == f"refs/remotes/origin/{branch}"
+
+
+def _refspec_excludes_branch(refspec: str, branch: str) -> bool:
+    refspec = refspec.removeprefix("+")
+    if not refspec.startswith("^"):
+        return False
+    source_ref = f"{_HEAD_REF_PREFIX}{branch}"
+    return _match_ref_pattern(refspec.removeprefix("^"), source_ref) is not None
 
 
 class GitHelper:
@@ -112,13 +153,32 @@ class GitHelper:
         repo_path: Path,
         ref: str,
         timeout: int = 60,
+        *,
+        follow_tags: bool = False,
     ) -> None:
         """Fetch one requested branch, tag, or full commit SHA."""
         if _FULL_SHA_RE.fullmatch(ref):
             refspecs = [f"+{ref}:refs/openhands/commits/{ref}"]
+        elif ref.startswith(_HEAD_REF_PREFIX):
+            branch = ref.removeprefix(_HEAD_REF_PREFIX)
+            run_git_command(
+                ["git", "check-ref-format", ref],
+                cwd=repo_path,
+                timeout=timeout,
+                expected_failure=True,
+            )
+            refspecs = [f"+{ref}:refs/remotes/origin/{branch}"]
+        elif ref.startswith(_TAG_REF_PREFIX):
+            run_git_command(
+                ["git", "check-ref-format", ref],
+                cwd=repo_path,
+                timeout=timeout,
+                expected_failure=True,
+            )
+            refspecs = [f"+{ref}:{ref}"]
         else:
-            branch_ref = f"refs/heads/{ref}"
-            tag_ref = f"refs/tags/{ref}"
+            branch_ref = f"{_HEAD_REF_PREFIX}{ref}"
+            tag_ref = f"{_TAG_REF_PREFIX}{ref}"
             run_git_command(
                 ["git", "check-ref-format", branch_ref],
                 cwd=repo_path,
@@ -132,21 +192,51 @@ class GitHelper:
 
         last_error: GitCommandError | None = None
         for refspec in refspecs:
+            command = ["git", "fetch"]
+            if not follow_tags:
+                command.append("--no-tags")
+            command.extend(["origin", refspec])
             try:
                 run_git_command(
-                    ["git", "fetch", "--no-tags", "origin", refspec],
+                    command,
                     cwd=repo_path,
                     timeout=timeout,
                     expected_failure=True,
                 )
-                return
             except GitCommandError as e:
                 if e.exit_code == -1:
                     raise
                 last_error = e
+                continue
+
+            return
 
         assert last_error is not None
         raise last_error
+
+    def needs_explicit_branch_fetch(
+        self,
+        repo_path: Path,
+        branch: str,
+        timeout: int = 10,
+    ) -> bool:
+        """Return whether a branch is neither mapped nor explicitly excluded."""
+        try:
+            configured = run_git_command(
+                ["git", "config", "--get-all", "remote.origin.fetch"],
+                cwd=repo_path,
+                timeout=timeout,
+                expected_failure=True,
+            )
+        except GitCommandError as e:
+            if e.exit_code == -1:
+                raise
+            return True
+
+        refspecs = configured.splitlines()
+        if any(_refspec_excludes_branch(refspec, branch) for refspec in refspecs):
+            return False
+        return not any(_refspec_maps_branch(refspec, branch) for refspec in refspecs)
 
     def checkout(
         self,
@@ -173,7 +263,15 @@ class GitHelper:
         timeout: int = 30,
     ) -> None:
         """Checkout a ref only after it resolves to a commit."""
-        checkout_args = [ref]
+        if ref.startswith(_HEAD_REF_PREFIX):
+            branch = ref.removeprefix(_HEAD_REF_PREFIX)
+            checkout_args = [branch]
+        elif ref.startswith("refs/"):
+            branch = None
+            checkout_args = [ref]
+        else:
+            branch = ref
+            checkout_args = [ref]
         try:
             resolved_ref = run_git_command(
                 [
@@ -188,9 +286,10 @@ class GitHelper:
                 expected_failure=True,
             )
         except GitCommandError as e:
-            if e.exit_code == -1 or _FULL_SHA_RE.fullmatch(ref):
+            if e.exit_code == -1 or _FULL_SHA_RE.fullmatch(ref) or branch is None:
                 raise _checkout_error(ref, e) from e
-            remote_ref = f"refs/remotes/origin/{ref}"
+            assert branch is not None
+            remote_ref = f"refs/remotes/origin/{branch}"
             try:
                 resolved_remote_ref = run_git_command(
                     [
@@ -208,12 +307,12 @@ class GitHelper:
                 raise _checkout_error(ref, remote_error) from remote_error
             checkout_args = (
                 ["--detach", resolved_remote_ref]
-                if ref.startswith("-")
-                else ["-b", ref, resolved_remote_ref]
+                if branch.startswith("-")
+                else ["-b", branch, resolved_remote_ref]
             )
         else:
-            if ref.startswith("-"):
-                checkout_args = [resolved_ref]
+            if branch is not None and branch.startswith("-"):
+                checkout_args = ["--detach", resolved_ref]
 
         run_git_command(
             ["git", "checkout", *checkout_args], cwd=repo_path, timeout=timeout
@@ -476,14 +575,15 @@ def _update_repository(
     with a pre-populated cache work without any network access.
 
     If the local checkout fails (ref not yet cached) or lands on a branch (needs
-    the remote's latest), falls through to the normal fetch → checkout → reset
+    the remote's latest), falls through to the requested fetch → checkout → reset
     cycle. On any failure, logs a warning and returns silently so the cached
     repository remains usable.
 
     Behavior by scenario:
         1. ref locally present and immutable (detached HEAD): local checkout only.
         2. ref specified but requires fetch: fetch -> checkout + reset.
-        3. ref is None, on a branch: fetch -> reset to origin/{current_branch}.
+        3. ref is None, on a branch: fetch configured refs, supplement the current
+           branch if needed, then reset to its origin ref.
         4. ref is None, detached HEAD: fetch -> checkout default branch -> reset.
 
     Args:
@@ -516,7 +616,7 @@ def _update_repository(
             git.fetch_requested_ref(repo_path, ref)
         elif not _try_fetch_requested_ref(repo_path, ref, git):
             return
-    elif not _try_fetch(repo_path, git):
+    elif ref and not _try_fetch(repo_path, git):
         return
 
     # If a specific ref was requested, check it out
@@ -528,10 +628,20 @@ def _update_repository(
         return
 
     # No ref specified - update based on current state
+    if not _try_fetch(repo_path, git):
+        return
     current_branch = git.get_current_branch(repo_path)
 
     if current_branch:
-        # On a branch: reset to track origin
+        branch_ref = f"{_HEAD_REF_PREFIX}{current_branch}"
+        if git.needs_explicit_branch_fetch(repo_path, current_branch):
+            if not _try_fetch_requested_ref(
+                repo_path,
+                branch_ref,
+                git,
+                follow_tags=True,
+            ):
+                return
         _try_reset_to_origin(repo_path, current_branch, git)
         return
 
@@ -549,10 +659,16 @@ def _try_fetch(repo_path: Path, git: GitHelper) -> bool:
         return False
 
 
-def _try_fetch_requested_ref(repo_path: Path, ref: str, git: GitHelper) -> bool:
+def _try_fetch_requested_ref(
+    repo_path: Path,
+    ref: str,
+    git: GitHelper,
+    *,
+    follow_tags: bool = False,
+) -> bool:
     """Fetch one requested ref, retaining its cached checkout on failure."""
     try:
-        git.fetch_requested_ref(repo_path, ref)
+        git.fetch_requested_ref(repo_path, ref, follow_tags=follow_tags)
         return True
     except GitCommandError as e:
         safe_ref = redact_url_credentials_in_text(ref)

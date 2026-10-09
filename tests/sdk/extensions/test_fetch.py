@@ -191,6 +191,25 @@ def test_fetch_local_path_nonexistent(tmp_path: Path):
 # -- fetch (remote sources) ---------------------------------------------------
 
 
+def _commit_version(source: Path, version: str, tag: str | None = None) -> str:
+    (source / "version.txt").write_text(version)
+    subprocess.run(["git", "add", "."], cwd=source, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", version], cwd=source, check=True)
+    if tag:
+        subprocess.run(
+            ["git", "-c", "tag.gpgSign=false", "tag", "-a", tag, "-m", version],
+            cwd=source,
+            check=True,
+        )
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=source,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
 def _create_git_source(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     source = tmp_path / "source"
     source.mkdir()
@@ -201,34 +220,18 @@ def _create_git_source(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         check=True,
     )
     subprocess.run(["git", "config", "user.name", "Test"], cwd=source, check=True)
-    (source / "version.txt").write_text("v1")
-    subprocess.run(["git", "add", "."], cwd=source, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "v1"], cwd=source, check=True)
-    subprocess.run(
-        ["git", "-c", "tag.gpgSign=false", "tag", "-a", "v1.0.0", "-m", "v1"],
-        cwd=source,
-        check=True,
-    )
-    main_head = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=source,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    main_head = _commit_version(source, "v1", tag="v1.0.0")
     subprocess.run(["git", "switch", "-q", "-c", "feature"], cwd=source, check=True)
-    (source / "version.txt").write_text("v2")
-    subprocess.run(["git", "add", "."], cwd=source, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "v2"], cwd=source, check=True)
-    feature_head = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=source,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    feature_head = _commit_version(source, "v2")
     subprocess.run(["git", "switch", "-q", "main"], cwd=source, check=True)
     return source, {"main": main_head, "feature": feature_head}
+
+
+def _clone_full_cache(source_url: str, cache_dir: Path) -> Path:
+    cache_dir.mkdir()
+    cached_path = get_cache_path(source_url, cache_dir)
+    subprocess.run(["git", "clone", "-q", source_url, cached_path], check=True)
+    return cached_path
 
 
 def test_fetch_github_shorthand_clones(tmp_path: Path):
@@ -276,6 +279,7 @@ def test_fetch_with_ref(tmp_path: Path):
 def test_fetch_updates_existing_cache(tmp_path: Path):
     mock_git = create_autospec(GitHelper, instance=True)
     mock_git.get_current_branch.return_value = "main"
+    mock_git.needs_explicit_branch_fetch.return_value = False
 
     cache_path = get_cache_path("https://github.com/owner/repo.git", tmp_path)
     cache_path.mkdir(parents=True)
@@ -289,7 +293,7 @@ def test_fetch_updates_existing_cache(tmp_path: Path):
     )
 
     assert result == cache_path
-    mock_git.fetch.assert_called()
+    mock_git.fetch.assert_called_once_with(cache_path)
     mock_git.clone.assert_not_called()
 
 
@@ -326,15 +330,122 @@ def test_fetch_remote_branch_after_default_shallow_clone(tmp_path: Path):
     assert resolved_ref == refs["feature"]
 
 
+def test_fetched_remote_branch_remains_refreshable_without_ref(tmp_path: Path):
+    source, _ = _create_git_source(tmp_path)
+    source_url = f"file://{source}"
+    cache_dir = tmp_path / "cache"
+    fetch(source_url, cache_dir=cache_dir)
+    cached_path = fetch(source_url, cache_dir=cache_dir, ref="feature")
+
+    subprocess.run(["git", "switch", "-q", "feature"], cwd=source, check=True)
+    _commit_version(source, "v3")
+
+    fetch(source_url, cache_dir=cache_dir)
+
+    assert (cached_path / "version.txt").read_text() == "v3"
+
+
+def test_fetch_without_ref_preserves_wildcard_remote_updates(tmp_path: Path):
+    source, _ = _create_git_source(tmp_path)
+    source_url = f"file://{source}"
+    cache_dir = tmp_path / "cache"
+    _clone_full_cache(source_url, cache_dir)
+
+    subprocess.run(["git", "switch", "-q", "feature"], cwd=source, check=True)
+    feature_head = _commit_version(source, "v3")
+    subprocess.run(["git", "switch", "-q", "main"], cwd=source, check=True)
+
+    fetch(source_url, cache_dir=cache_dir)
+    source.rename(tmp_path / "offline-source")
+    result, resolved_ref = fetch_with_resolution(
+        source_url,
+        cache_dir=cache_dir,
+        ref="feature",
+    )
+
+    assert (result / "version.txt").read_text() == "v3"
+    assert resolved_ref == feature_head
+
+
+def test_fetch_without_ref_respects_negative_fetch_refspec(tmp_path: Path):
+    source, _ = _create_git_source(tmp_path)
+    source_url = f"file://{source}"
+    cache_dir = tmp_path / "cache"
+    cached_path = _clone_full_cache(source_url, cache_dir)
+    subprocess.run(
+        ["git", "config", "--add", "remote.origin.fetch", "^refs/heads/feature"],
+        cwd=cached_path,
+        check=True,
+    )
+    subprocess.run(["git", "switch", "-q", "feature"], cwd=cached_path, check=True)
+
+    subprocess.run(["git", "switch", "-q", "feature"], cwd=source, check=True)
+    _commit_version(source, "v3")
+
+    fetch(source_url, cache_dir=cache_dir)
+
+    assert (cached_path / "version.txt").read_text() == "v2"
+
+
+def test_fetch_qualified_branch_after_default_shallow_clone(tmp_path: Path):
+    source, refs = _create_git_source(tmp_path)
+    source_url = f"file://{source}"
+    cache_dir = tmp_path / "cache"
+    fetch(source_url, cache_dir=cache_dir)
+
+    result, resolved_ref = fetch_with_resolution(
+        source_url,
+        cache_dir=cache_dir,
+        ref="refs/heads/feature",
+    )
+
+    assert (result / "version.txt").read_text() == "v2"
+    assert resolved_ref == refs["feature"]
+
+
+def test_fetch_qualified_tag_after_default_shallow_clone(tmp_path: Path):
+    source, _ = _create_git_source(tmp_path)
+    source_url = f"file://{source}"
+    cache_dir = tmp_path / "cache"
+    fetch(source_url, cache_dir=cache_dir)
+    tagged_head = _commit_version(source, "tagged", tag="v2")
+
+    result, resolved_ref = fetch_with_resolution(
+        source_url,
+        cache_dir=cache_dir,
+        ref="refs/tags/v2",
+    )
+
+    assert (result / "version.txt").read_text() == "tagged"
+    assert resolved_ref == tagged_head
+
+
+def test_fetch_without_ref_caches_new_reachable_tag(tmp_path: Path):
+    source, _ = _create_git_source(tmp_path)
+    source_url = f"file://{source}"
+    cache_dir = tmp_path / "cache"
+    fetch(source_url, cache_dir=cache_dir)
+    tagged_head = _commit_version(source, "tagged", tag="v2")
+
+    fetch(source_url, cache_dir=cache_dir)
+    source.rename(tmp_path / "offline-source")
+    result, resolved_ref = fetch_with_resolution(
+        source_url,
+        cache_dir=cache_dir,
+        ref="v2",
+    )
+
+    assert (result / "version.txt").read_text() == "tagged"
+    assert resolved_ref == tagged_head
+
+
 @pytest.mark.parametrize("ref_kind", ["tag", "sha"])
 def test_fetch_older_immutable_ref_after_default_shallow_clone(
     tmp_path: Path,
     ref_kind: str,
 ):
     source, refs = _create_git_source(tmp_path)
-    (source / "version.txt").write_text("latest")
-    subprocess.run(["git", "add", "."], cwd=source, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "latest"], cwd=source, check=True)
+    _commit_version(source, "latest")
     source_url = f"file://{source}"
     cache_dir = tmp_path / "cache"
     cached_path = fetch(source_url, cache_dir=cache_dir)
