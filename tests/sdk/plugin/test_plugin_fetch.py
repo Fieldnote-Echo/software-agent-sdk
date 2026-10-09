@@ -59,7 +59,7 @@ def test_fetch_unknown_ref_from_existing_cache_raises_plugin_fetch_error(
     cache_path.mkdir(parents=True)
     (cache_path / ".git").mkdir()
     mock_git = create_autospec(GitHelper, instance=True)
-    mock_git.checkout.side_effect = GitCommandError(
+    mock_git.checkout_requested_ref.side_effect = GitCommandError(
         "unknown ref",
         command=["git", "checkout", "missing-ref"],
         exit_code=1,

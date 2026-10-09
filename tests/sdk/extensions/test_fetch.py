@@ -309,6 +309,48 @@ def test_fetch_rejects_unknown_ref_in_existing_cache(tmp_path: Path):
     assert (cached_path / "version.txt").read_text() == "v1"
 
 
+def test_fetch_remote_branch_after_default_shallow_clone(tmp_path: Path):
+    source, refs = _create_git_source(tmp_path)
+    source_url = f"file://{source}"
+    cache_dir = tmp_path / "cache"
+    cached_path = fetch(source_url, cache_dir=cache_dir)
+    assert (cached_path / "version.txt").read_text() == "v1"
+
+    result, resolved_ref = fetch_with_resolution(
+        source_url,
+        cache_dir=cache_dir,
+        ref="feature",
+    )
+
+    assert (result / "version.txt").read_text() == "v2"
+    assert resolved_ref == refs["feature"]
+
+
+@pytest.mark.parametrize("ref_kind", ["tag", "sha"])
+def test_fetch_older_immutable_ref_after_default_shallow_clone(
+    tmp_path: Path,
+    ref_kind: str,
+):
+    source, refs = _create_git_source(tmp_path)
+    (source / "version.txt").write_text("latest")
+    subprocess.run(["git", "add", "."], cwd=source, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "latest"], cwd=source, check=True)
+    source_url = f"file://{source}"
+    cache_dir = tmp_path / "cache"
+    cached_path = fetch(source_url, cache_dir=cache_dir)
+    assert (cached_path / "version.txt").read_text() == "latest"
+    requested_ref = "v1.0.0" if ref_kind == "tag" else refs["main"]
+
+    result, resolved_ref = fetch_with_resolution(
+        source_url,
+        cache_dir=cache_dir,
+        ref=requested_ref,
+    )
+
+    assert (result / "version.txt").read_text() == "v1"
+    assert resolved_ref == refs["main"]
+
+
 @pytest.mark.parametrize("ref", ["--detach", "version.txt"])
 def test_fetch_rejects_checkout_argument_or_path_as_ref(tmp_path: Path, ref: str):
     source, _ = _create_git_source(tmp_path)
@@ -433,7 +475,7 @@ def test_fetch_no_update_with_ref_checks_out(tmp_path: Path):
         git_helper=mock_git,
     )
 
-    mock_git.checkout.assert_called_once_with(cache_path, "v1.0.0", validate_ref=True)
+    mock_git.checkout_requested_ref.assert_called_once_with(cache_path, "v1.0.0")
 
 
 def test_fetch_git_error_raises_extension_fetch_error(tmp_path: Path):
