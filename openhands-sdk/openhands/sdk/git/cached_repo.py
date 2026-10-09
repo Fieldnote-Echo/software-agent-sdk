@@ -27,6 +27,15 @@ DEFAULT_LOCK_TIMEOUT = 30
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
+def _checkout_error(ref: str, error: GitCommandError) -> GitCommandError:
+    return GitCommandError(
+        message=f"git checkout failed: {error}",
+        command=["git", "checkout", redact_url_credentials(ref)],
+        exit_code=error.exit_code,
+        stderr=error.stderr,
+    )
+
+
 class GitHelper:
     """Abstraction for git operations, enabling easy mocking in tests.
 
@@ -94,18 +103,70 @@ class GitHelper:
 
         run_git_command(cmd, cwd=repo_path, timeout=timeout)
 
-    def checkout(self, repo_path: Path, ref: str, timeout: int = 30) -> None:
+    def checkout(
+        self,
+        repo_path: Path,
+        ref: str,
+        timeout: int = 30,
+        *,
+        validate_ref: bool = False,
+    ) -> None:
         """Checkout a ref (branch, tag, or commit).
 
         Args:
             repo_path: Path to the repository.
             ref: Branch, tag, or commit to checkout.
             timeout: Timeout in seconds.
+            validate_ref: Require ref to resolve to a commit before checkout.
 
         Raises:
             GitCommandError: If checkout fails.
         """
-        run_git_command(["git", "checkout", ref], cwd=repo_path, timeout=timeout)
+        if not validate_ref:
+            run_git_command(["git", "checkout", ref], cwd=repo_path, timeout=timeout)
+            return
+
+        checkout_args = [ref]
+        try:
+            resolved_ref = run_git_command(
+                [
+                    "git",
+                    "rev-parse",
+                    "--verify",
+                    "--end-of-options",
+                    f"{ref}^{{commit}}",
+                ],
+                cwd=repo_path,
+                timeout=timeout,
+                expected_failure=True,
+            )
+        except GitCommandError as e:
+            if e.exit_code == -1 or _FULL_SHA_RE.fullmatch(ref):
+                raise _checkout_error(ref, e) from e
+            remote_ref = f"refs/remotes/origin/{ref}"
+            try:
+                run_git_command(
+                    [
+                        "git",
+                        "rev-parse",
+                        "--verify",
+                        "--end-of-options",
+                        f"{remote_ref}^{{commit}}",
+                    ],
+                    cwd=repo_path,
+                    timeout=timeout,
+                    expected_failure=True,
+                )
+            except GitCommandError as remote_error:
+                raise _checkout_error(ref, remote_error) from remote_error
+            checkout_args = ["--track", f"origin/{ref}"]
+        else:
+            if ref.startswith("-"):
+                checkout_args = [resolved_ref]
+
+        run_git_command(
+            ["git", "checkout", *checkout_args], cwd=repo_path, timeout=timeout
+        )
 
     def reset_hard(self, repo_path: Path, ref: str, timeout: int = 30) -> None:
         """Hard reset to a ref.
@@ -201,6 +262,7 @@ def try_cached_clone_or_update(
     update: bool = True,
     git_helper: GitHelper | None = None,
     lock_timeout: float = DEFAULT_LOCK_TIMEOUT,
+    strict_ref: bool = False,
 ) -> Path | None:
     """Clone or update a git repository in a cache directory.
 
@@ -227,6 +289,8 @@ def try_cached_clone_or_update(
         update: If True and repo exists, fetch and update it. If False, skip fetch.
         git_helper: GitHelper instance for git operations. If None, creates one.
         lock_timeout: Timeout in seconds for acquiring the lock. Default is 5 minutes.
+        strict_ref: Return None instead of using another cached checkout when the
+            requested ref cannot be checked out.
 
     Returns:
         Path to the local repository if successful, None on failure.
@@ -243,7 +307,9 @@ def try_cached_clone_or_update(
 
     try:
         with lock.acquire(timeout=lock_timeout):
-            return _do_clone_or_update(url, repo_path, ref, update, git)
+            return _do_clone_or_update(
+                url, repo_path, ref, update, git, strict_ref=strict_ref
+            )
     except Timeout:
         logger.warning(
             f"Timed out waiting for lock on {repo_path} after {lock_timeout}s"
@@ -263,6 +329,7 @@ def _do_clone_or_update(
     ref: str | None,
     update: bool,
     git: GitHelper,
+    strict_ref: bool = False,
 ) -> Path:
     """Perform the actual clone or update operation (called while holding lock).
 
@@ -272,6 +339,8 @@ def _do_clone_or_update(
         ref: Branch, tag, or commit to checkout.
         update: Whether to update existing repos.
         git: GitHelper instance.
+        strict_ref: Whether failure to check out a requested ref should fail the
+            operation instead of falling back to another cached checkout.
 
     Returns:
         Path to the repository.
@@ -282,10 +351,10 @@ def _do_clone_or_update(
     if repo_path.exists() and (repo_path / ".git").exists():
         if update:
             logger.debug(f"Updating repository at {repo_path}")
-            _update_repository(repo_path, ref, git)
+            _update_repository(repo_path, ref, git, strict_ref=strict_ref)
         elif ref:
             logger.debug(f"Checking out ref {ref} at {repo_path}")
-            _checkout_ref(repo_path, ref, git)
+            _checkout_ref(repo_path, ref, git, strict_ref=strict_ref)
         else:
             logger.debug(f"Using cached repository at {repo_path}")
     else:
@@ -329,6 +398,7 @@ def _update_repository(
     repo_path: Path,
     ref: str | None,
     git: GitHelper,
+    strict_ref: bool = False,
 ) -> None:
     """Update an existing cached repository to the latest remote state.
 
@@ -354,26 +424,36 @@ def _update_repository(
         ref: Branch, tag, or commit to update to. If None, uses current branch
             or falls back to the remote's default branch.
         git: GitHelper instance.
+        strict_ref: Raise when a requested ref cannot be checked out instead of
+            leaving the repository on another cached checkout.
     """
+    ref_missing_locally = False
     if ref:
         # Optimistically attempt a local checkout before touching the network.
         # Detached HEAD after checkout means the ref is a tag or commit SHA that
         # is already present in the local object store — skip the fetch entirely.
         try:
-            git.checkout(repo_path, ref)
+            if strict_ref:
+                git.checkout(repo_path, ref, validate_ref=True)
+            else:
+                git.checkout(repo_path, ref)
             if git.get_current_branch(repo_path) is None:
                 logger.debug("Ref %r already present locally; skipping fetch", ref)
                 return
         except GitCommandError:
-            pass  # ref not cached locally; fall through to fetch
+            ref_missing_locally = True
 
-    # Fetch from origin - if this fails, we still have a usable (stale) cache
-    if not _try_fetch(repo_path, git):
+    if strict_ref and ref_missing_locally:
+        git.fetch(repo_path)
+    elif not _try_fetch(repo_path, git):
         return
 
     # If a specific ref was requested, check it out
     if ref:
-        _try_checkout_and_reset(repo_path, ref, git)
+        if strict_ref:
+            _checkout_ref(repo_path, ref, git, strict_ref=True)
+        else:
+            _try_checkout_and_reset(repo_path, ref, git)
         return
 
     # No ref specified - update based on current state
@@ -455,7 +535,12 @@ def _recover_from_detached_head(repo_path: Path, git: GitHelper) -> None:
         )
 
 
-def _checkout_ref(repo_path: Path, ref: str, git: GitHelper) -> None:
+def _checkout_ref(
+    repo_path: Path,
+    ref: str,
+    git: GitHelper,
+    strict_ref: bool = False,
+) -> None:
     """Checkout a specific ref (branch, tag, or commit).
 
     Handles each ref type with appropriate semantics:
@@ -473,6 +558,7 @@ def _checkout_ref(repo_path: Path, ref: str, git: GitHelper) -> None:
         repo_path: Path to the repository.
         ref: Branch name, tag name, or commit SHA to checkout.
         git: GitHelper instance.
+        strict_ref: Require ref to resolve to a commit before checkout.
 
     Raises:
         GitCommandError: If checkout fails (ref doesn't exist or isn't reachable).
@@ -480,7 +566,10 @@ def _checkout_ref(repo_path: Path, ref: str, git: GitHelper) -> None:
     logger.debug(f"Checking out ref: {ref}")
 
     # Checkout is the critical operation - let it raise if it fails
-    git.checkout(repo_path, ref)
+    if strict_ref:
+        git.checkout(repo_path, ref, validate_ref=True)
+    else:
+        git.checkout(repo_path, ref)
 
     # Determine what we checked out by examining HEAD state
     current_branch = git.get_current_branch(repo_path)

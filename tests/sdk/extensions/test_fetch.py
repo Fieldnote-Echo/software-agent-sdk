@@ -1,5 +1,6 @@
 """Tests for extensions fetch utilities."""
 
+import subprocess
 from pathlib import Path
 from unittest.mock import create_autospec
 
@@ -190,6 +191,46 @@ def test_fetch_local_path_nonexistent(tmp_path: Path):
 # -- fetch (remote sources) ---------------------------------------------------
 
 
+def _create_git_source(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    source = tmp_path / "source"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=source, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"],
+        cwd=source,
+        check=True,
+    )
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=source, check=True)
+    (source / "version.txt").write_text("v1")
+    subprocess.run(["git", "add", "."], cwd=source, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "v1"], cwd=source, check=True)
+    subprocess.run(
+        ["git", "-c", "tag.gpgSign=false", "tag", "-a", "v1.0.0", "-m", "v1"],
+        cwd=source,
+        check=True,
+    )
+    main_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=source,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "switch", "-q", "-c", "feature"], cwd=source, check=True)
+    (source / "version.txt").write_text("v2")
+    subprocess.run(["git", "add", "."], cwd=source, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "v2"], cwd=source, check=True)
+    feature_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=source,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "switch", "-q", "main"], cwd=source, check=True)
+    return source, {"main": main_head, "feature": feature_head}
+
+
 def test_fetch_github_shorthand_clones(tmp_path: Path):
     mock_git = create_autospec(GitHelper, instance=True)
 
@@ -252,6 +293,112 @@ def test_fetch_updates_existing_cache(tmp_path: Path):
     mock_git.clone.assert_not_called()
 
 
+def test_fetch_rejects_unknown_ref_in_existing_cache(tmp_path: Path):
+    source, _ = _create_git_source(tmp_path)
+    source_url = f"file://{source}"
+    cache_dir = tmp_path / "cache"
+    cached_path = fetch(source_url, cache_dir=cache_dir)
+
+    with pytest.raises(ExtensionFetchError, match="Failed to fetch extension"):
+        fetch(
+            source_url,
+            cache_dir=cache_dir,
+            ref="missing-ref",
+        )
+
+    assert (cached_path / "version.txt").read_text() == "v1"
+
+
+@pytest.mark.parametrize("ref", ["--detach", "version.txt"])
+def test_fetch_rejects_checkout_argument_or_path_as_ref(tmp_path: Path, ref: str):
+    source, _ = _create_git_source(tmp_path)
+    source_url = f"file://{source}"
+    cache_dir = tmp_path / "cache"
+    fetch(source_url, cache_dir=cache_dir)
+
+    with pytest.raises(ExtensionFetchError, match="Failed to fetch extension"):
+        fetch(source_url, cache_dir=cache_dir, ref=ref)
+
+
+def test_fetch_rejects_uncached_ref_when_fetch_fails(tmp_path: Path):
+    source, _ = _create_git_source(tmp_path)
+    source_url = f"file://{source}"
+    cache_dir = tmp_path / "cache"
+    fetch(source_url, cache_dir=cache_dir)
+    source.rename(tmp_path / "offline-source")
+
+    with pytest.raises(ExtensionFetchError, match="Failed to fetch extension"):
+        fetch(
+            source_url,
+            cache_dir=cache_dir,
+            ref="missing-ref",
+        )
+
+
+@pytest.mark.parametrize("ref_kind", ["tag", "sha"])
+def test_fetch_uses_cached_immutable_ref_while_offline(tmp_path: Path, ref_kind: str):
+    source, refs = _create_git_source(tmp_path)
+    source_url = f"file://{source}"
+    cache_dir = tmp_path / "cache"
+    fetch(source_url, cache_dir=cache_dir)
+    source.rename(tmp_path / "offline-source")
+    requested_ref = refs["main"] if ref_kind == "sha" else "v1.0.0"
+
+    result, resolved_ref = fetch_with_resolution(
+        source_url,
+        cache_dir=cache_dir,
+        ref=requested_ref,
+    )
+
+    assert (result / "version.txt").read_text() == "v1"
+    assert resolved_ref == refs["main"]
+
+
+def test_fetch_uses_cached_remote_branch_while_offline(tmp_path: Path):
+    source, refs = _create_git_source(tmp_path)
+    source_url = f"file://{source}"
+    cache_dir = tmp_path / "cache"
+    fetch(source_url, cache_dir=cache_dir, ref=refs["main"])
+    source.rename(tmp_path / "offline-source")
+
+    result, resolved_ref = fetch_with_resolution(
+        source_url,
+        cache_dir=cache_dir,
+        ref="feature",
+    )
+
+    assert (result / "version.txt").read_text() == "v2"
+    assert resolved_ref == refs["feature"]
+
+
+def test_fetch_does_not_treat_missing_full_sha_as_remote_branch(tmp_path: Path):
+    source, refs = _create_git_source(tmp_path)
+    missing_sha = "f" * 40
+    subprocess.run(
+        ["git", "branch", missing_sha, "feature"],
+        cwd=source,
+        check=True,
+    )
+    source_url = f"file://{source}"
+    cache_dir = tmp_path / "cache"
+    fetch(source_url, cache_dir=cache_dir, ref=refs["main"])
+
+    with pytest.raises(ExtensionFetchError, match="Failed to fetch extension"):
+        fetch(source_url, cache_dir=cache_dir, ref=missing_sha)
+
+
+def test_fetch_without_ref_uses_existing_cache_when_fetch_fails(tmp_path: Path):
+    source, _ = _create_git_source(tmp_path)
+    source_url = f"file://{source}"
+    cache_dir = tmp_path / "cache"
+    cache_path = fetch(source_url, cache_dir=cache_dir)
+    source.rename(tmp_path / "offline-source")
+
+    result = fetch(source_url, cache_dir=cache_dir)
+
+    assert result == cache_path
+
+
 def test_fetch_no_update_uses_cache(tmp_path: Path):
     mock_git = create_autospec(GitHelper, instance=True)
 
@@ -286,7 +433,7 @@ def test_fetch_no_update_with_ref_checks_out(tmp_path: Path):
         git_helper=mock_git,
     )
 
-    mock_git.checkout.assert_called_once_with(cache_path, "v1.0.0")
+    mock_git.checkout.assert_called_once_with(cache_path, "v1.0.0", validate_ref=True)
 
 
 def test_fetch_git_error_raises_extension_fetch_error(tmp_path: Path):
