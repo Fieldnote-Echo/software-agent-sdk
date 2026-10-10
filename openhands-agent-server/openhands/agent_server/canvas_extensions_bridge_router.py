@@ -15,6 +15,7 @@ from openhands.agent_server.canvas_extensions_router import (
     CANVAS_EXTENSION_NAME_PATTERN,
 )
 from openhands.agent_server.dependencies import check_session_api_key
+from openhands.agent_server.init_router import require_initialized
 
 
 app_backend_bridge_router = APIRouter(tags=["Canvas App Backends"])
@@ -95,8 +96,14 @@ async def proxy_app_backend_http_endpoint(
     return await proxy_app_backend_http(request, extension_name, path)
 
 
-@app_backend_bridge_router.websocket("/app-backends/{extension_name}")
-@app_backend_bridge_router.websocket("/app-backends/{extension_name}/{path:path}")
+@app_backend_bridge_router.websocket(
+    "/app-backends/{extension_name}",
+    dependencies=[Depends(require_initialized)],
+)
+@app_backend_bridge_router.websocket(
+    "/app-backends/{extension_name}/{path:path}",
+    dependencies=[Depends(require_initialized)],
+)
 async def proxy_app_backend_websocket_endpoint(
     extension_name: AppBackendNamePath,
     websocket: WebSocket,
