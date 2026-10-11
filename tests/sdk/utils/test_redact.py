@@ -289,6 +289,24 @@ class TestRedactTextSecretsDictKeys:
         assert redact_text_secrets(text) == text
 
 
+@pytest.mark.parametrize(
+    ("key", "key_quote", "value_quote"),
+    [
+        ("private_key", "'", "'"),
+        ("token", '"', '"'),
+        ("authorization", "'", '"'),
+        ("password", '\\"', '\\"'),
+    ],
+    ids=["pem", "double-quotes", "mixed-quotes", "escaped-quotes"],
+)
+def test_redact_text_secrets_redacts_multiline_values(key, key_quote, value_quote):
+    head = f"{{{key_quote}{key}{key_quote}: {value_quote}"
+    secret = "-----BEGIN PRIVATE KEY-----\nsecret-content\n-----END PRIVATE KEY-----"
+    tail = f"{value_quote}, 'note': 'first public line\nsecond public line'}}"
+
+    assert redact_text_secrets(f"{head}{secret}{tail}") == f"{head}<redacted>{tail}"
+
+
 class TestRedactTextSecretsHeaders:
     """Header entries as provider errors echo them: any case, either quote
     style, hyphenated names, and JSON embedded with escaped quotes."""

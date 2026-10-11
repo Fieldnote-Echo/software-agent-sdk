@@ -282,7 +282,7 @@ def sanitize_config(config: dict[str, Any]) -> dict[str, Any]:
 _SENSITIVE_ENTRY_RE = re.compile(
     r"(?P<head>(?P<kq>\\?[\"'])[\w-]*(?:key|secret|token|password|authorization)"
     r"[\w-]*(?P=kq)\s*:\s*)(?P<q>\\?[\"'])(?P<value>.*?)(?P=q)",
-    re.IGNORECASE,
+    re.IGNORECASE | re.DOTALL,
 )
 
 

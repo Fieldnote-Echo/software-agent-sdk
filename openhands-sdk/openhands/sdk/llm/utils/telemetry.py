@@ -11,7 +11,7 @@ from typing import Any, ClassVar
 from litellm.cost_calculator import completion_cost as litellm_completion_cost
 from litellm.types.llms.openai import ResponseAPIUsage, ResponsesAPIResponse
 from litellm.types.utils import CostPerToken, ModelResponse, Usage
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, SecretStr
 
 from openhands.sdk.llm.utils.litellm_provider import LLMProvider
 from openhands.sdk.llm.utils.metrics import Metrics
@@ -484,7 +484,7 @@ def _redact_request_credentials(ctx: dict[str, Any]) -> dict[str, Any]:
     for key, value in kwargs.items():
         if key in ("extra_headers", "headers"):
             logged_kwargs[key] = sanitize_dict(value)
-        elif isinstance(value, str) and is_secret_key(key):
+        elif isinstance(value, (str, SecretStr)) and is_secret_key(key):
             logged_kwargs[key] = sanitize_dict({key: value})[key]
     return {**ctx, "kwargs": logged_kwargs}
 

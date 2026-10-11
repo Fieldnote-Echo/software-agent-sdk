@@ -230,7 +230,12 @@ def _completion_with_provider_auth_header(
             raise ValueError(error_message)
         return create_mock_litellm_response(content="ok")
 
-    messages = [Message(role="user", content=[TextContent(text="hi")])]
+    messages = [
+        Message(
+            role="system", content=[TextContent(text="You are a helpful assistant.")]
+        ),
+        Message(role="user", content=[TextContent(text="hi")]),
+    ]
     with patch("openhands.sdk.llm.llm.litellm_completion", side_effect=provider):
         if fail:
             with pytest.raises(Exception):
@@ -274,22 +279,29 @@ def test_log_completions_redact_caller_credential_headers():
     assert logged_headers["X-Trace-Id"] == "trace-1"
 
 
-def test_log_completions_redact_credential_options_without_changing_request():
+@pytest.mark.parametrize("fail", [False, True], ids=["response", "error"])
+@pytest.mark.parametrize("credential_type", [str, SecretStr], ids=["str", "SecretStr"])
+def test_log_completions_redact_credential_options_without_changing_request(
+    credential_type: type[str] | type[SecretStr], fail: bool
+):
+    api_key = credential_type("caller-secret")
+    aws_secret_access_key = credential_type("aws-secret")
     with tempfile.TemporaryDirectory() as temp_dir:
         received_kwargs = _completion_with_provider_auth_header(
             temp_dir,
             extra_headers={"X-Trace-Id": "trace-1"},
+            fail=fail,
             completion_kwargs={
-                "api_key": "caller-secret",
-                "aws_secret_access_key": "aws-secret",
+                "api_key": api_key,
+                "aws_secret_access_key": aws_secret_access_key,
                 "max_completion_tokens": 42,
             },
         )
         raw = _read_only_log(temp_dir)
 
     logged_kwargs = json.loads(raw)["kwargs"]
-    assert received_kwargs["api_key"] == "caller-secret"
-    assert received_kwargs["aws_secret_access_key"] == "aws-secret"
+    assert received_kwargs["api_key"] == api_key
+    assert received_kwargs["aws_secret_access_key"] == aws_secret_access_key
     assert received_kwargs["max_completion_tokens"] == 42
     assert "caller-secret" not in raw
     assert "aws-secret" not in raw
@@ -299,13 +311,21 @@ def test_log_completions_redact_credential_options_without_changing_request():
     assert logged_kwargs["extra_headers"]["X-Trace-Id"] == "trace-1"
 
 
-def test_log_completions_redact_credentials_in_provider_error():
+@pytest.mark.parametrize(
+    "error_message",
+    [
+        "provider failed: api_key='error-secret'",
+        "provider failed: {'private_key': 'first-line\nerror-secret\nlast-line'}",
+    ],
+    ids=["api-key", "multiline"],
+)
+def test_log_completions_redact_credentials_in_provider_error(error_message):
     with tempfile.TemporaryDirectory() as temp_dir:
         _completion_with_provider_auth_header(
             temp_dir,
             extra_headers={"X-Trace-Id": "trace-1"},
             fail=True,
-            error_message="provider failed: api_key='error-secret'",
+            error_message=error_message,
         )
         raw = _read_only_log(temp_dir)
 
