@@ -95,6 +95,9 @@ def test_dynamic_runner_option_boundary_is_uncertain():
         f"set -- -c '{_DEL_QUOTED}'; bash \"$@\"",
         f"set -- errexit -c '{_DEL_QUOTED}'; bash -o \"$@\"",
         f"ARGS=(-c '{_DEL_QUOTED}'); bash \"${{ARGS[@]}}\"",
+        'bash -c -- "$@"',
+        'bash -c - "$@"',
+        'bash -c -- "${SCRIPTS[@]}"',
     ],
 )
 def test_multi_argument_runner_expansion_is_uncertain(command: str):
@@ -104,6 +107,17 @@ def test_multi_argument_runner_expansion_is_uncertain(command: str):
     assert result.uncertain is True
     assert PatternSecurityAnalyzer().security_risk(make_action(command)) == (
         SecurityRisk.UNKNOWN
+    )
+
+
+def test_multi_argument_operand_without_script_flag_is_not_scanned():
+    command = 'bash -- "$@"'
+    result = scan_shell_command(command, _DETECTOR_ID)
+
+    assert result.matched is False
+    assert result.uncertain is False
+    assert PatternSecurityAnalyzer().security_risk(make_action(command)) == (
+        SecurityRisk.LOW
     )
 
 

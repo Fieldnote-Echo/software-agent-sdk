@@ -490,7 +490,7 @@ def _extract_script_operand(
         literal = arguments[index]
         word = argument_words[index]
         if argument_arity_is_uncertain(literal, word):
-            if options_ended:
+            if options_ended and not has_script_flag:
                 return False, None, False
             return has_script_flag, None, True
         if literal is None:
