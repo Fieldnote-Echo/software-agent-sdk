@@ -244,7 +244,8 @@
         <p class="lede">
           This change replaces flattened-text regular expressions with the shared
           tree-sitter Bash AST. It keeps the current rail IDs and priority. It
-          returns <code>UNKNOWN</code> when relevant syntax cannot be resolved.
+          parses original shell source and returns <code>UNKNOWN</code> when command
+          selection or argument positions cannot be resolved.
         </p>
         <div class="decision">
           <div><strong>API</strong>No public API or schema change.</div>
@@ -293,7 +294,8 @@
               <rect x="598" y="320" width="248" height="70" rx="8"/>
             </g>
             <g font-family="ui-monospace, monospace" font-size="14" fill="#17202a" text-anchor="middle">
-              <text x="137" y="237">_normalize_shell_source()</text>
+              <text x="137" y="228">original shell source</text>
+              <text x="137" y="247">executable segments</text>
               <text x="377" y="237">_safe_parse()</text>
               <text x="617" y="228">resolve_command()</text>
               <text x="617" y="247">wrapper resolution</text>
@@ -316,34 +318,36 @@
         <h2>2. Changed code</h2>
         <div class="grid">
           <article class="card">
-            <h3><a href="https://github.com/Fieldnote-Echo/software-agent-sdk/blob/c2168a4b5b1904c4087e627bd32af02503c0e000/openhands-sdk/openhands/sdk/security/defense_in_depth/policy_rails.py#L136">Policy rails</a></h3>
+            <h3><a href="https://github.com/Fieldnote-Echo/software-agent-sdk/blob/58847b816fd5a65a64ca43889b5220bf8703a02e/openhands-sdk/openhands/sdk/security/defense_in_depth/policy_rails.py#L135">Policy rails</a></h3>
             <p>Walk the Bash AST once. Inspect pipeline stages, resolved commands, device paths, and delete targets. Keep the existing rail priority.</p>
             <p><a href="https://github.com/OpenHands/software-agent-sdk/blob/e3a26821f8f7c85e98078c7b5e1a80647fc7d0c7/openhands-sdk/openhands/sdk/security/defense_in_depth/policy_rails.py#L68">Compare the former regular-expression path.</a></p>
           </article>
           <article class="card">
-            <h3><a href="https://github.com/Fieldnote-Echo/software-agent-sdk/blob/c2168a4b5b1904c4087e627bd32af02503c0e000/openhands-sdk/openhands/sdk/security/defense_in_depth/shell_semantics.py#L107">Shared command semantics</a></h3>
-            <p>Resolve the static command name and arguments once. Reuse that result in policy rails and the existing pattern scanner.</p>
+            <h3><a href="https://github.com/Fieldnote-Echo/software-agent-sdk/blob/58847b816fd5a65a64ca43889b5220bf8703a02e/openhands-sdk/openhands/sdk/security/defense_in_depth/shell_semantics.py#L203">Shared command semantics</a></h3>
+            <p>Resolve command names and arguments once. Preserve uncertainty when expansion can change argument count or option selection.</p>
             <p><a href="https://github.com/OpenHands/software-agent-sdk/blob/e3a26821f8f7c85e98078c7b5e1a80647fc7d0c7/openhands-sdk/openhands/sdk/security/defense_in_depth/shell_semantics.py#L171">Compare the former scanner helpers.</a></p>
           </article>
           <article class="card">
-            <h3><a href="https://github.com/Fieldnote-Echo/software-agent-sdk/blob/c2168a4b5b1904c4087e627bd32af02503c0e000/openhands-sdk/openhands/sdk/security/defense_in_depth/utils.py#L346">Input normalization</a></h3>
-            <p>Keep the compact text path for regular-expression consumers. Preserve shell whitespace and newlines for AST parsing.</p>
-            <p><a href="https://github.com/OpenHands/software-agent-sdk/blob/e3a26821f8f7c85e98078c7b5e1a80647fc7d0c7/openhands-sdk/openhands/sdk/security/defense_in_depth/utils.py#L346">Compare the former shared normalization path.</a></p>
+            <h3><a href="https://github.com/Fieldnote-Echo/software-agent-sdk/blob/58847b816fd5a65a64ca43889b5220bf8703a02e/openhands-sdk/openhands/sdk/security/defense_in_depth/policy_rails.py#L497">Original-source parse boundary</a></h3>
+            <p>Feed original executable segments to the parser. Keep NFKC normalization only in the separate regular-expression text path.</p>
+            <p>This prevents normalization from creating comments or shell operators before parsing.</p>
           </article>
           <article class="card">
-            <h3><a href="https://github.com/Fieldnote-Echo/software-agent-sdk/blob/c2168a4b5b1904c4087e627bd32af02503c0e000/tests/sdk/security/defense_in_depth/test_policy_rails.py#L115">Regression tests</a></h3>
-            <p>Cover wrappers, nested scripts, pipelines, inert text, device paths, path traversal, rail priority, and unresolved syntax.</p>
+            <h3><a href="https://github.com/Fieldnote-Echo/software-agent-sdk/blob/58847b816fd5a65a64ca43889b5220bf8703a02e/tests/sdk/security/defense_in_depth/test_policy_rails.py#L187">Regression tests</a></h3>
+            <p>Cover original Unicode source, dynamic <code>dd</code> operands, wrapper positions, nested producers, expansion arity, and known controls.</p>
+            <p><a href="https://github.com/Fieldnote-Echo/software-agent-sdk/blob/58847b816fd5a65a64ca43889b5220bf8703a02e/tests/sdk/security/defense_in_depth/test_shell_semantics.py#L78">Pattern scanner boundary tests.</a></p>
           </article>
         </div>
 
         <details>
           <summary>Source manifest</summary>
-          <pre>policy_rails.py       +375 / -68
-shell_semantics.py     +61 / -70
-utils.py                +6 /  -9
-test_policy_rails.py   +121 /  -0
---------------------------------
-4 files               +563 / -147</pre>
+          <pre>policy_rails.py        +436 / -73
+shell_semantics.py     +251 / -86
+test_policy_rails.py   +291 /  -0
+test_shell_semantics.py +53 /  -0
+---------------------------------
+4 runtime/test files  +1031 / -159
+.pr/design.html        temporary reviewer artifact</pre>
         </details>
       </section>
 
@@ -354,10 +358,12 @@ test_policy_rails.py   +121 /  -0
             <tr><th>Input property</th><th>Old path</th><th>New path</th></tr>
           </thead>
           <tbody>
-            <tr><td>Shell whitespace and newlines</td><td>Collapsed before checks.</td><td>Preserved for the parser.</td></tr>
+            <tr><td>Shell source</td><td>NFKC normalization ran before parsing.</td><td>Original executable segments reach the parser.</td></tr>
             <tr><td>Fetch in an executed pipeline stage</td><td>Matched selected text forms.</td><td>Detected from pipeline structure.</td></tr>
             <tr><td>Fetch text inside an argument</td><td>Could resemble an executable pipeline.</td><td>Ignored unless the nested pipeline executes.</td></tr>
-            <tr><td>Long <code>dd</code> command</td><td>Output target had a fixed search window.</td><td>Static arguments have no text window.</td></tr>
+            <tr><td>Dynamic <code>dd</code> operand</td><td>Quoted spelling could bypass uncertainty.</td><td>Any unresolved operand returns <code>UNKNOWN</code>.</td></tr>
+            <tr><td>Wrapper or shell option position</td><td>Skipped dynamic values could hide the real command.</td><td>Argument-count uncertainty is preserved.</td></tr>
+            <tr><td>Nested shell as a pipeline producer</td><td>The nested scan lost the outer pipe.</td><td>The unmodeled boundary returns <code>UNKNOWN</code>.</td></tr>
             <tr><td>Unknown relevant syntax</td><td>Could fall through to <code>LOW</code>.</td><td>Returns <code>UNKNOWN</code>.</td></tr>
           </tbody>
         </table>
@@ -372,21 +378,20 @@ test_policy_rails.py   +121 /  -0
       <section id="evidence">
         <h2>4. Evidence</h2>
         <p class="result">
-          The related security suite passed: <strong>307 passed, 10 xfailed</strong>.
+          The SDK security suite passed: <strong>598 passed, 7 skipped, 10 xfailed</strong>.
           All selected pre-commit hooks also passed, including Ruff, pycodestyle,
           pyright, import rules, and tool registration.
         </p>
         <details>
           <summary>Commands</summary>
-          <pre>UV_CACHE_DIR=/tmp/uv-cache-2721 uv run pytest -q \
-  tests/sdk/security/defense_in_depth \
-  tests/sdk/security/test_shell_ast.py
+          <pre>UV_CACHE_DIR=/tmp/uv-cache-2721 uv run pytest -q tests/sdk/security
 
 UV_CACHE_DIR=/tmp/uv-cache-2721 uv run pre-commit run --files \
   openhands-sdk/openhands/sdk/security/defense_in_depth/policy_rails.py \
   openhands-sdk/openhands/sdk/security/defense_in_depth/shell_semantics.py \
   openhands-sdk/openhands/sdk/security/defense_in_depth/utils.py \
-  tests/sdk/security/defense_in_depth/test_policy_rails.py</pre>
+  tests/sdk/security/defense_in_depth/test_policy_rails.py \
+  tests/sdk/security/defense_in_depth/test_shell_semantics.py</pre>
         </details>
       </section>
 
