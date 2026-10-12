@@ -334,9 +334,9 @@
             <p>This prevents normalization from creating comments or shell operators before parsing.</p>
           </article>
           <article class="card">
-            <h3><a href="https://github.com/Fieldnote-Echo/software-agent-sdk/blob/7bac254b1ccf3ce19e1dd26aedff7d523189f2ba/tests/sdk/security/defense_in_depth/test_policy_rails.py#L187">Regression tests</a></h3>
+            <h3><a href="https://github.com/Fieldnote-Echo/software-agent-sdk/blob/c516fe34e22a6c322c21a40d22c96a5583b99fe6/tests/sdk/security/defense_in_depth/test_policy_rails.py#L187">Regression tests</a></h3>
             <p>Cover original Unicode source, dynamic <code>dd</code> operands, wrapper positions, nested producers, expansion arity, script mode across option terminators, and known controls.</p>
-            <p><a href="https://github.com/Fieldnote-Echo/software-agent-sdk/blob/7bac254b1ccf3ce19e1dd26aedff7d523189f2ba/tests/sdk/security/defense_in_depth/test_shell_semantics.py#L78">Pattern scanner boundary tests.</a></p>
+            <p><a href="https://github.com/Fieldnote-Echo/software-agent-sdk/blob/c516fe34e22a6c322c21a40d22c96a5583b99fe6/tests/sdk/security/defense_in_depth/test_shell_semantics.py#L78">Pattern scanner boundary tests.</a></p>
           </article>
         </div>
 
@@ -344,10 +344,10 @@
           <summary>Source manifest</summary>
           <pre>policy_rails.py        +436 / -73
 shell_semantics.py     +251 / -86
-test_policy_rails.py   +295 /  -0
+test_policy_rails.py   +296 /  -0
 test_shell_semantics.py +67 /  -0
 ---------------------------------
-4 runtime/test files  +1049 / -159
+4 runtime/test files  +1050 / -159
 .pr/design.html        temporary reviewer artifact</pre>
         </details>
       </section>
@@ -380,7 +380,7 @@ test_shell_semantics.py +67 /  -0
       <section id="evidence">
         <h2>4. Evidence</h2>
         <p class="result">
-          The SDK security suite passed: <strong>606 passed, 7 skipped, 10 xfailed</strong>.
+          The SDK security suite passed: <strong>608 passed, 7 skipped, 10 xfailed</strong>.
           All selected pre-commit hooks also passed, including Ruff, pycodestyle,
           pyright, import rules, and tool registration.
         </p>
