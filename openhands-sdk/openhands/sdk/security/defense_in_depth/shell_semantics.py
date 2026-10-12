@@ -1,28 +1,27 @@
-"""AST-backed shell-command detection for the pattern analyzer.
+"""Shared AST-backed shell command semantics for security analyzers.
 
-Resolves command names structurally against the shared tree-sitter
-``_shell_ast`` view (issue #2721, Phase 2b) so that quoted, path-qualified,
-and nested command names become visible to the recursive force-delete
-detector. Only that family is scanned here; injection and Python-code
-patterns stay as regex in ``pattern.py`` because they are not shell syntax.
+Resolves command names and arguments against the shared tree-sitter
+``_shell_ast`` view (issue #2721). Policy rails reuse these facts for pipeline,
+wrapper, raw-disk, delete, and nested-script analysis. The pattern analyzer
+uses the same view for recursive force-delete detection. Injection and
+Python-code patterns stay as regex in ``pattern.py`` because they are not shell
+syntax.
 
-The scanner reports ``uncertain`` -- so the analyzer can emit ``UNKNOWN``
-rather than a false ``LOW``, the ensemble convention agreed in #2721
-(UNKNOWN fails safe under ``ConfirmRisky``) -- whenever it cannot vouch for
-what it saw:
+The destructive-command scanner reports ``uncertain`` when it cannot verify a
+relevant structure. The analyzer can then emit ``UNKNOWN`` rather than a false
+``LOW``:
 
 - the destructive flag shape appears on a command whose verb cannot be
-  resolved (an opaque or dynamic name);
-- an ERROR/MISSING parse node intersects a span the detection relies on (a
-  command carrying the destructive flag shape, or a shell runner's argv);
-- the nested-runner depth bound is hit with a script operand still
-  unscanned.
+  resolved;
+- a dynamic argument or unsupported option group prevents safe selection of a
+  shell runner's script operand;
+- an ERROR/MISSING parse node intersects a command span the detector uses; or
+- the nested-runner depth bound is hit with a script operand still unscanned.
 
-Benign text that merely fails to parse as shell is not treated as
-uncertain: parse errors outside the spans above stay LOW, because arbitrary
-non-shell text routinely fails to parse and surfacing every such error
-would flood the ensemble with UNKNOWNs. Detector IDs are owned by
-``pattern.py`` and passed in unchanged.
+Shell parse errors outside these spans stay ``LOW``. Arbitrary non-shell text
+can contain parse errors, so mapping each error to ``UNKNOWN`` would produce too
+many uncertain results. Detector IDs are owned by ``pattern.py`` and passed in
+unchanged.
 """
 
 from __future__ import annotations
@@ -133,11 +132,11 @@ class CommandSemantics:
 class ShellScanResult:
     """Outcome of an AST-backed shell scan.
 
-    ``detector_id`` is the matched pattern stable ID when ``matched`` is
-    True, else None. ``uncertain`` is True when the scan saw something it
-    could not vouch for (destructive flag shape on an unresolvable verb, a
-    parse error on a relied-on span, or the nesting depth bound hit),
-    signalling the caller to emit ``UNKNOWN`` instead of ``LOW``.
+    ``detector_id`` is the matched pattern stable ID when ``matched`` is True,
+    else None. ``uncertain`` is True when the scan cannot resolve a relevant
+    command or shell-runner boundary, cannot trust a required parse span, or
+    reaches the nesting depth bound. The caller then emits ``UNKNOWN`` instead
+    of ``LOW``.
     """
 
     matched: bool
@@ -150,8 +149,9 @@ class SignalOutput:
     """Outcome of scanning one program or command for a destructive verb.
 
     ``matched`` is True once a recursive force delete is resolved concretely.
-    ``uncertain`` is True when the scan saw a destructive shape it could not
-    vouch for, which the caller turns into ``UNKNOWN`` rather than ``LOW``.
+    ``uncertain`` is True when the scan cannot verify a destructive shape or a
+    relevant shell-runner boundary. The caller turns this into ``UNKNOWN``
+    rather than ``LOW``.
 
     A concrete match always outranks uncertainty, so ``matched`` and
     ``uncertain`` are never both True.
@@ -173,14 +173,11 @@ def scan_shell_command(command: str, rm_detector_id: str) -> ShellScanResult:
     descends into shell-runner script operands, and reports a match for the
     recursive force-delete family.
 
-    Uncertainty is reported narrowly, only when the scan cannot vouch for
-    what it saw: a command carries the recursive-and-force flag shape but
-    its verb cannot be trusted (opaque or dynamic name, or an ERROR/MISSING
-    parse node intersecting the command), a shell runner's argv is touched
-    by a parse error, or the nesting depth bound was hit with a script
-    operand still unscanned. In each case the caller emits UNKNOWN rather
-    than a false LOW. A benign string that merely fails to parse as shell
-    is not treated as uncertain; it stays LOW.
+    Uncertainty is reported narrowly. It applies when the scan cannot verify a
+    destructive command, a relevant shell-runner option boundary, a required
+    parse span, or a nested script before the depth limit. In each case the
+    caller emits UNKNOWN rather than a false LOW. An unrelated parse error
+    stays LOW.
     """
     program = _safe_parse(command)
     if program is None:
@@ -481,7 +478,8 @@ def _extract_script_operand(
     descent.
 
     Returns ``(has_flag, operand, uncertain)``. ``uncertain`` is True when a
-    dynamic word prevents the option and operand boundary from being known.
+    dynamic word or unsupported option group prevents safe selection of the
+    script operand.
     """
     has_script_flag = False
     options_ended = False

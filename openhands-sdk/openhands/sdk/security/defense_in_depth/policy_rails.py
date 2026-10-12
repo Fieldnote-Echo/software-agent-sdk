@@ -512,14 +512,12 @@ def _evaluate_rail(content: str) -> RailDecision:
 
 
 class PolicyRailSecurityAnalyzer(SecurityAnalyzerBase):
-    """Catch composed threats that plain regex signatures would miss.
+    """Catch threats defined by shell command structure.
 
-    Use this when you need to detect threats defined by *combinations*
-    of tokens (e.g., ``curl`` piped to ``bash``) rather than individual
-    signatures. While these rails *could* each be expressed as a single
-    regex, keeping them as named rules with per-segment evaluation makes
-    the threat model more interpretable, the rules easier to maintain,
-    and the audit trail clearer than a flat pattern list.
+    Named rails use shell syntax to detect dangerous operations, such as a
+    network fetch piped to a downstream command. Per-segment evaluation keeps
+    the threat model interpretable and prevents text from separate fields from
+    forming one match.
 
     Evaluates original executable segments only -- reasoning text is never
     scanned.
