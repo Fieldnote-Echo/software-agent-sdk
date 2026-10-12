@@ -243,9 +243,10 @@
         <h1>Policy rails inspect shell structure</h1>
         <p class="lede">
           This change replaces flattened-text regular expressions with the shared
-          tree-sitter Bash AST. It keeps the current rail IDs and priority. It
-          parses original shell source and returns <code>UNKNOWN</code> when command
-          selection or argument positions cannot be resolved.
+          tree-sitter Bash AST. It keeps the current rail IDs and priority, and it
+          implements issue #2721's fetch-to-downstream-command policy. It parses
+          original shell source and returns <code>UNKNOWN</code> when command selection
+          or argument positions cannot be resolved.
         </p>
         <div class="decision">
           <div><strong>API</strong>No public API or schema change.</div>
@@ -323,7 +324,7 @@
             <p><a href="https://github.com/OpenHands/software-agent-sdk/blob/e3a26821f8f7c85e98078c7b5e1a80647fc7d0c7/openhands-sdk/openhands/sdk/security/defense_in_depth/policy_rails.py#L68">Compare the former regular-expression path.</a></p>
           </article>
           <article class="card">
-            <h3><a href="https://github.com/Fieldnote-Echo/software-agent-sdk/blob/58847b816fd5a65a64ca43889b5220bf8703a02e/openhands-sdk/openhands/sdk/security/defense_in_depth/shell_semantics.py#L203">Shared command semantics</a></h3>
+            <h3><a href="https://github.com/Fieldnote-Echo/software-agent-sdk/blob/7bac254b1ccf3ce19e1dd26aedff7d523189f2ba/openhands-sdk/openhands/sdk/security/defense_in_depth/shell_semantics.py#L203">Shared command semantics</a></h3>
             <p>Resolve command names and arguments once. Preserve uncertainty when expansion can change argument count or option selection.</p>
             <p><a href="https://github.com/OpenHands/software-agent-sdk/blob/e3a26821f8f7c85e98078c7b5e1a80647fc7d0c7/openhands-sdk/openhands/sdk/security/defense_in_depth/shell_semantics.py#L171">Compare the former scanner helpers.</a></p>
           </article>
@@ -333,9 +334,9 @@
             <p>This prevents normalization from creating comments or shell operators before parsing.</p>
           </article>
           <article class="card">
-            <h3><a href="https://github.com/Fieldnote-Echo/software-agent-sdk/blob/58847b816fd5a65a64ca43889b5220bf8703a02e/tests/sdk/security/defense_in_depth/test_policy_rails.py#L187">Regression tests</a></h3>
-            <p>Cover original Unicode source, dynamic <code>dd</code> operands, wrapper positions, nested producers, expansion arity, and known controls.</p>
-            <p><a href="https://github.com/Fieldnote-Echo/software-agent-sdk/blob/58847b816fd5a65a64ca43889b5220bf8703a02e/tests/sdk/security/defense_in_depth/test_shell_semantics.py#L78">Pattern scanner boundary tests.</a></p>
+            <h3><a href="https://github.com/Fieldnote-Echo/software-agent-sdk/blob/7bac254b1ccf3ce19e1dd26aedff7d523189f2ba/tests/sdk/security/defense_in_depth/test_policy_rails.py#L187">Regression tests</a></h3>
+            <p>Cover original Unicode source, dynamic <code>dd</code> operands, wrapper positions, nested producers, expansion arity, script mode across option terminators, and known controls.</p>
+            <p><a href="https://github.com/Fieldnote-Echo/software-agent-sdk/blob/7bac254b1ccf3ce19e1dd26aedff7d523189f2ba/tests/sdk/security/defense_in_depth/test_shell_semantics.py#L78">Pattern scanner boundary tests.</a></p>
           </article>
         </div>
 
@@ -343,10 +344,10 @@
           <summary>Source manifest</summary>
           <pre>policy_rails.py        +436 / -73
 shell_semantics.py     +251 / -86
-test_policy_rails.py   +291 /  -0
-test_shell_semantics.py +53 /  -0
+test_policy_rails.py   +295 /  -0
+test_shell_semantics.py +67 /  -0
 ---------------------------------
-4 runtime/test files  +1031 / -159
+4 runtime/test files  +1049 / -159
 .pr/design.html        temporary reviewer artifact</pre>
         </details>
       </section>
@@ -363,6 +364,7 @@ test_shell_semantics.py +53 /  -0
             <tr><td>Fetch text inside an argument</td><td>Could resemble an executable pipeline.</td><td>Ignored unless the nested pipeline executes.</td></tr>
             <tr><td>Dynamic <code>dd</code> operand</td><td>Quoted spelling could bypass uncertainty.</td><td>Any unresolved operand returns <code>UNKNOWN</code>.</td></tr>
             <tr><td>Wrapper or shell option position</td><td>Skipped dynamic values could hide the real command.</td><td>Argument-count uncertainty is preserved.</td></tr>
+            <tr><td>Script mode before <code>--</code> or <code>-</code></td><td>A later multi-argument expansion could erase the selected <code>-c</code> mode.</td><td>The unresolved script operand returns <code>UNKNOWN</code>.</td></tr>
             <tr><td>Nested shell as a pipeline producer</td><td>The nested scan lost the outer pipe.</td><td>The unmodeled boundary returns <code>UNKNOWN</code>.</td></tr>
             <tr><td>Unknown relevant syntax</td><td>Could fall through to <code>LOW</code>.</td><td>Returns <code>UNKNOWN</code>.</td></tr>
           </tbody>
@@ -378,7 +380,7 @@ test_shell_semantics.py +53 /  -0
       <section id="evidence">
         <h2>4. Evidence</h2>
         <p class="result">
-          The SDK security suite passed: <strong>598 passed, 7 skipped, 10 xfailed</strong>.
+          The SDK security suite passed: <strong>606 passed, 7 skipped, 10 xfailed</strong>.
           All selected pre-commit hooks also passed, including Ruff, pycodestyle,
           pyright, import rules, and tool registration.
         </p>
