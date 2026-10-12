@@ -28,14 +28,13 @@ from openhands.sdk.security.defense_in_depth.shell_semantics import (
     _MAX_NESTING_DEPTH,
     CommandSemantics,
     _safe_parse,
+    argument_arity_is_uncertain,
     has_recursive_force_flags,
     resolve_command,
     static_shell_script,
+    static_word_prefix,
 )
-from openhands.sdk.security.defense_in_depth.utils import (
-    _extract_exec_segments,
-    _normalize_shell_source,
-)
+from openhands.sdk.security.defense_in_depth.utils import _extract_exec_segments
 from openhands.sdk.security.risk import SecurityRisk
 
 
@@ -207,7 +206,9 @@ def _scan_program(
         _scan_raw_disk(semantics, signals)
         _scan_catastrophic_delete(semantics, signals)
 
-        has_script, script = static_shell_script(semantics)
+        has_script, script, script_uncertain = static_shell_script(semantics)
+        if script_uncertain:
+            signals.uncertain = True
         if not has_script:
             continue
         if script is None:
@@ -229,7 +230,24 @@ def _resolve_wrappers(command: CommandSemantics) -> CommandSemantics:
         index = 0
         while index < len(command.arguments):
             argument = command.arguments[index]
+            word = command.argument_words[index]
+            if argument_arity_is_uncertain(argument, word):
+                return replace(command, uncertain=True)
             if argument is None:
+                prefix = static_word_prefix(word)
+                if (
+                    command.basename in _ASSIGNMENT_WRAPPERS
+                    and not prefix.startswith("-")
+                    and "=" in prefix
+                ):
+                    break
+                if (
+                    prefix.startswith("--")
+                    and "=" in prefix
+                    and _wrapper_option_value_count(prefix, options) == 0
+                ):
+                    index += 1
+                    continue
                 return replace(command, uncertain=True)
             if argument == "--":
                 index += 1
@@ -239,22 +257,54 @@ def _resolve_wrappers(command: CommandSemantics) -> CommandSemantics:
             value_count = _wrapper_option_value_count(argument, options)
             if value_count is None or index + value_count >= len(command.arguments):
                 return replace(command, uncertain=True)
+            if any(
+                argument_arity_is_uncertain(value, word)
+                for value, word in zip(
+                    command.arguments[index + 1 : index + value_count + 1],
+                    command.argument_words[index + 1 : index + value_count + 1],
+                    strict=True,
+                )
+            ):
+                return replace(command, uncertain=True)
             index += value_count + 1
 
         if command.basename in _ASSIGNMENT_WRAPPERS:
             while index < len(command.arguments):
                 argument = command.arguments[index]
-                if argument is None:
+                word = command.argument_words[index]
+                if argument_arity_is_uncertain(
+                    argument,
+                    word,
+                ):
                     return replace(command, uncertain=True)
+                if argument is None:
+                    prefix = static_word_prefix(word)
+                    if not prefix.partition("=")[1]:
+                        return replace(command, uncertain=True)
+                    index += 1
+                    continue
                 if "=" not in argument:
                     break
                 index += 1
-        index += _PREFIX_OPERAND_WRAPPERS.get(command.basename, 0)
+        prefix_count = _PREFIX_OPERAND_WRAPPERS.get(command.basename, 0)
+        if any(
+            argument_arity_is_uncertain(value, word)
+            for value, word in zip(
+                command.arguments[index : index + prefix_count],
+                command.argument_words[index : index + prefix_count],
+                strict=True,
+            )
+        ):
+            return replace(command, uncertain=True)
+        index += prefix_count
 
         if index >= len(command.arguments):
             return command
         target = command.arguments[index]
-        if target is None:
+        if target is None or argument_arity_is_uncertain(
+            target,
+            command.argument_words[index],
+        ):
             return replace(command, uncertain=True)
         command = CommandSemantics(
             basename=target.rsplit("/", 1)[-1],
@@ -325,6 +375,9 @@ def _scan_fetch_pipelines(
                     command.node, pipeline.node.named_children[index]
                 ):
                     continue
+                has_script, _, script_uncertain = static_shell_script(semantics)
+                if has_script or script_uncertain:
+                    signals.uncertain = True
                 if _is_fetch(semantics):
                     signals.fetch_to_exec = True
                     return
@@ -356,7 +409,7 @@ def _scan_raw_disk(command: CommandSemantics, signals: _RailSignals) -> None:
         return
     for argument, word in zip(command.arguments, command.argument_words, strict=True):
         if argument is None:
-            if basename == "dd" and word.text.casefold().startswith("of="):
+            if basename == "dd":
                 signals.uncertain = True
             continue
         key, separator, value = argument.partition("=")
@@ -366,6 +419,8 @@ def _scan_raw_disk(command: CommandSemantics, signals: _RailSignals) -> None:
         if basename == "dd" and is_device_output:
             signals.raw_disk_reason = "Raw disk write via dd"
             return
+        if basename == "dd" and argument_arity_is_uncertain(argument, word):
+            signals.uncertain = True
         if command.uncertain and (is_device_output or _is_device_path(argument)):
             signals.uncertain = True
 
@@ -381,6 +436,8 @@ def _scan_catastrophic_delete(
         if argument is None:
             has_unresolved_argument = True
             continue
+        if argument_arity_is_uncertain(argument, word):
+            has_unresolved_argument = True
         if not options_ended and argument == "--":
             options_ended = True
             continue
@@ -440,10 +497,10 @@ def _normalize_absolute_path(path: str) -> str | None:
 def _evaluate_rail(content: str) -> RailDecision:
     """Evaluate rails against a single string (convenience wrapper).
 
-    Normalizes encoding evasions while preserving shell whitespace. This
-    matches the behavior of ``PolicyRailSecurityAnalyzer.security_risk()``.
+    Parses the original shell source so text normalization cannot change its
+    execution structure. This matches ``PolicyRailSecurityAnalyzer``.
     """
-    return _evaluate_rail_segments([_normalize_shell_source(content)])
+    return _evaluate_rail_segments([content])
 
 
 # ---------------------------------------------------------------------------
@@ -461,8 +518,8 @@ class PolicyRailSecurityAnalyzer(SecurityAnalyzerBase):
     the threat model more interpretable, the rules easier to maintain,
     and the audit trail clearer than a flat pattern list.
 
-    Evaluates normalized executable segments only -- reasoning text is
-    never scanned.
+    Evaluates original executable segments only -- reasoning text is never
+    scanned.
 
     Returns ``SecurityRisk.HIGH`` when a rail fires, ``UNKNOWN`` when a
     relevant shell structure cannot be resolved, and ``LOW`` otherwise.
@@ -479,9 +536,8 @@ class PolicyRailSecurityAnalyzer(SecurityAnalyzerBase):
     """
 
     def security_risk(self, action: ActionEvent) -> SecurityRisk:
-        """Evaluate policy rails on normalized executable segments."""
-        segments = [_normalize_shell_source(s) for s in _extract_exec_segments(action)]
-        rail = _evaluate_rail_segments(segments)
+        """Evaluate policy rails on original executable segments."""
+        rail = _evaluate_rail_segments(_extract_exec_segments(action))
         if rail.outcome != SecurityRisk.LOW:
             logger.debug(
                 "Policy rail result: %s (%s) -> %s",

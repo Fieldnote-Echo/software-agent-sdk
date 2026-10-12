@@ -102,6 +102,22 @@ _MAX_NESTING_DEPTH: Final[int] = 8
 # any other character the backslash is literal and must be retained.
 _DOUBLE_QUOTE_ESCAPABLE: Final[frozenset[str]] = frozenset('$`"\\')
 
+# Quoted dynamic content stays in one argv position, except for the Bash
+# ``@`` expansions handled below. Other unresolved word shapes can split.
+_SINGLE_ARGUMENT_DYNAMIC_NODE_TYPES: Final[frozenset[str]] = frozenset(
+    {
+        "string",
+        "raw_string",
+        "ansi_c_string",
+        "arithmetic_expansion",
+        "process_substitution",
+    }
+)
+
+_DEFINITE_NON_OPTION_NODE_TYPES: Final[frozenset[str]] = frozenset(
+    {"arithmetic_expansion", "process_substitution"}
+)
+
 
 @dataclass(frozen=True, slots=True)
 class CommandSemantics:
@@ -189,11 +205,21 @@ def resolve_command(command: ShellCommand) -> CommandSemantics:
     name_literal = (
         _resolve_node_literal(command.name.node) if command.name is not None else None
     )
+    name_arity_uncertain = command.name is not None and argument_arity_is_uncertain(
+        name_literal,
+        command.name,
+    )
     return CommandSemantics(
-        basename=_posix_basename(name_literal) if name_literal is not None else None,
+        basename=(
+            _posix_basename(name_literal)
+            if name_literal is not None and not name_arity_uncertain
+            else None
+        ),
         arguments=tuple(_resolve_node_literal(word.node) for word in command.words),
         argument_words=command.words,
-        uncertain=command.name is not None and name_literal is None,
+        uncertain=(
+            command.name is not None and (name_literal is None or name_arity_uncertain)
+        ),
     )
 
 
@@ -203,11 +229,131 @@ def has_recursive_force_flags(command: CommandSemantics) -> bool:
     return ("r" in flags or "R" in flags) and "f" in flags
 
 
-def static_shell_script(command: CommandSemantics) -> tuple[bool, str | None]:
-    """Return the static script for a resolved shell ``-c`` invocation."""
+def static_shell_script(command: CommandSemantics) -> tuple[bool, str | None, bool]:
+    """Return the script and option-boundary uncertainty for a shell runner."""
     if command.basename not in _SHELL_RUNNERS:
-        return False, None
-    return _extract_script_operand(command.arguments)
+        return False, None, False
+    return _extract_script_operand(command.arguments, command.argument_words)
+
+
+def argument_arity_is_uncertain(
+    literal: str | None,
+    word: ShellWord,
+) -> bool:
+    """Return whether one source word can change the number of argv words."""
+    if literal is not None:
+        return _contains_unquoted_arity_syntax(word.text)
+    return _node_arity_is_uncertain(word.node)
+
+
+def static_word_prefix(word: ShellWord) -> str:
+    """Return the literal prefix before the first dynamic node in a shell word."""
+    prefix, _ = _static_node_prefix(word.node)
+    return prefix
+
+
+def _static_node_prefix(node: Node) -> tuple[str, bool]:
+    if node.type in _DYNAMIC_NAME_NODE_TYPES:
+        return "", False
+    if node.type in {"string", "command_name", "concatenation"}:
+        parts: list[str] = []
+        for child in node.named_children:
+            prefix, complete = _static_node_prefix(child)
+            parts.append(prefix)
+            if not complete:
+                return "".join(parts), False
+        return "".join(parts), True
+    literal = _resolve_node_literal(node)
+    return (literal, True) if literal is not None else ("", False)
+
+
+def _node_arity_is_uncertain(node: Node) -> bool:
+    if node.type == "string":
+        return _contains_multi_argument_expansion(node)
+    if node.type in _SINGLE_ARGUMENT_DYNAMIC_NODE_TYPES or node.type in {
+        "word",
+        "number",
+    }:
+        return False
+    if node.type == "concatenation":
+        return _contains_unquoted_arity_syntax(_decode(node.text)) or any(
+            _node_arity_is_uncertain(child) for child in node.named_children
+        )
+    return True
+
+
+def _contains_multi_argument_expansion(node: Node) -> bool:
+    if node.type in {"expansion", "simple_expansion"}:
+        if any(
+            child.type == "special_variable_name" and _decode(child.text) == "@"
+            for child in node.named_children
+        ):
+            return True
+        if node.type == "expansion":
+            subscript = next(
+                (child for child in node.named_children if child.type == "subscript"),
+                None,
+            )
+            if subscript is not None:
+                index = subscript.child_by_field_name("index")
+                if index is not None and _decode(index.text) == "@":
+                    return True
+            child_types = [child.type for child in node.children]
+            if "!" in child_types and child_types[-2:] == ["@", "}"]:
+                return True
+    return any(
+        _contains_multi_argument_expansion(child) for child in node.named_children
+    )
+
+
+def _contains_unquoted_arity_syntax(text: str) -> bool:
+    """Detect unquoted pathname and brace expansion syntax in one shell word."""
+    bracket_open = False
+    brace_expands: list[bool] = []
+    quote: str | None = None
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if quote == "'":
+            if character == quote:
+                quote = None
+            index += 1
+            continue
+        if quote == '"':
+            if (
+                character == "\\"
+                and index + 1 < len(text)
+                and (
+                    text[index + 1] in _DOUBLE_QUOTE_ESCAPABLE
+                    or text[index + 1] == "\n"
+                )
+            ):
+                index += 2
+                continue
+            if character == quote:
+                quote = None
+            index += 1
+            continue
+        if character == "\\":
+            index += 2
+            continue
+        if character in {"'", '"'}:
+            quote = character
+        elif character in {"*", "?"}:
+            return True
+        elif character == "[":
+            bracket_open = True
+        elif character == "]" and bracket_open:
+            return True
+        elif character == "{":
+            brace_expands.append(False)
+        elif character == "}" and brace_expands:
+            if brace_expands.pop():
+                return True
+        elif brace_expands and (character == "," or text.startswith("..", index)):
+            brace_expands[-1] = True
+        index += 1
+    return False
 
 
 def _program_signal(program: ShellProgram, depth: int) -> SignalOutput:
@@ -230,6 +376,15 @@ def _program_signal(program: ShellProgram, depth: int) -> SignalOutput:
                 # may not be the verb the shell would run. Keep scanning
                 # for a concrete match first.
                 uncertain = True
+        elif resolved.basename == _RM_BASENAME and any(
+            literal is not None and argument_arity_is_uncertain(literal, word)
+            for literal, word in zip(
+                resolved.arguments,
+                resolved.argument_words,
+                strict=True,
+            )
+        ):
+            uncertain = True
         nested = _nested_signal(command, resolved, depth)
         if nested.matched:
             return _MATCH_SIGNAL
@@ -292,7 +447,7 @@ def _nested_signal(
     """
     if resolved.basename not in _SHELL_RUNNERS:
         return _NO_SIGNAL
-    has_script, inner = static_shell_script(resolved)
+    has_script, inner, uncertain = static_shell_script(resolved)
     if has_script and inner is not None:
         if depth >= _MAX_NESTING_DEPTH:
             return _UNCERTAIN_SIGNAL
@@ -303,6 +458,8 @@ def _nested_signal(
                 return _MATCH_SIGNAL
             if nested.uncertain:
                 return _UNCERTAIN_SIGNAL
+    if uncertain:
+        return _UNCERTAIN_SIGNAL
     if command.has_error:
         return _UNCERTAIN_SIGNAL
     return _NO_SIGNAL
@@ -310,7 +467,8 @@ def _nested_signal(
 
 def _extract_script_operand(
     arguments: tuple[str | None, ...],
-) -> tuple[bool, str | None]:
+    argument_words: tuple[ShellWord, ...],
+) -> tuple[bool, str | None, bool]:
     """Locate the runner script operand using POSIX argv option semantics.
 
     Short options combine, so the script flag counts at any position in a
@@ -322,24 +480,27 @@ def _extract_script_operand(
     to that script rather than to the runner, so it must not trigger a
     descent.
 
-    Returns ``(has_flag, operand)``. ``has_flag`` is True when the script
-    flag is present in the option list. ``operand`` is the de-quoted,
-    escape-normalized literal text of the script operand, or None when the
-    flag has no operand or the operand is dynamic (unresolvable at analysis
-    time).
+    Returns ``(has_flag, operand, uncertain)``. ``uncertain`` is True when a
+    dynamic word prevents the option and operand boundary from being known.
     """
     has_script_flag = False
     options_ended = False
     index = 0
     while index < len(arguments):
         literal = arguments[index]
+        word = argument_words[index]
+        if argument_arity_is_uncertain(literal, word):
+            if options_ended:
+                return False, None, False
+            return has_script_flag, None, True
         if literal is None:
-            # A dynamic argv word cannot be classified as option or operand
-            # at analysis time. Treat it as the first operand: a dynamic
-            # script operand is deliberately not uncertain (see
-            # _scan_script_operand), and assuming an option here could
-            # over-descend into text the runner would never execute.
-            return has_script_flag, None
+            if has_script_flag:
+                return True, None, False
+            if options_ended:
+                return False, None, False
+            if word.node_type in _DEFINITE_NON_OPTION_NODE_TYPES:
+                return False, None, False
+            return False, None, index + 1 < len(arguments)
         if not options_ended:
             if literal == _END_OF_OPTIONS or literal == _BARE_DASH:
                 options_ended = True
@@ -348,13 +509,26 @@ def _extract_script_operand(
             if _is_option_word(literal):
                 if _sets_script_flag(literal):
                     has_script_flag = True
-                index += 2 if _consumes_next_word(literal) else 1
+                if _consumes_next_word(literal):
+                    value_index = index + 1
+                    if value_index < len(arguments) and (
+                        argument_words[value_index].node_type
+                        in _DEFINITE_NON_OPTION_NODE_TYPES
+                        or argument_arity_is_uncertain(
+                            arguments[value_index],
+                            argument_words[value_index],
+                        )
+                    ):
+                        return has_script_flag, None, True
+                    index += 2
+                else:
+                    index += 1
                 continue
         # First operand reached.
         if has_script_flag:
-            return True, literal
-        return False, None
-    return has_script_flag, None
+            return True, literal, False
+        return False, None, False
+    return has_script_flag, None, False
 
 
 def _is_option_word(literal: str) -> bool:

@@ -154,6 +154,9 @@ class TestPolicyRailAnalyzer:
             "env -uFOO sudo --user=root bash -c 'dd of=/dev/sda'",
             RAIL_RAW_DISK_OP,
         ),
+        ('env A="$VALUE" dd of=/dev/sda', RAIL_RAW_DISK_OP),
+        ('sudo A="$VALUE" rm -rf /', RAIL_CATASTROPHIC_DELETE),
+        ("bash -o \"$OPT\" -c 'dd of=/dev/sda'", RAIL_RAW_DISK_OP),
         ("bash -c 'curl x | node'", RAIL_FETCH_TO_EXEC),
         ("bash -c 'echo ok\nrm -rf /'", RAIL_CATASTROPHIC_DELETE),
         ('echo "$(curl x | node)"', RAIL_FETCH_TO_EXEC),
@@ -181,6 +184,173 @@ def test_structural_rails_detect_executable_commands(command: str, rule_name: st
     ],
 )
 def test_inert_shell_text_is_low(command: str):
+    assert _evaluate_rail(command).outcome == SecurityRisk.LOW
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo ＃; dd of=/dev/sda",
+        "bash -c 'echo ＃; dd of=/dev/sda'",
+    ],
+)
+def test_shell_source_is_parsed_before_text_normalization(command: str):
+    decision = _evaluate_rail(command)
+
+    assert decision.outcome == SecurityRisk.HIGH
+    assert decision.rule_name == RAIL_RAW_DISK_OP
+    assert PolicyRailSecurityAnalyzer().security_risk(make_action(command)) == (
+        SecurityRisk.HIGH
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo #; dd of=/dev/sda",
+        "bash -c 'echo #; dd of=/dev/sda'",
+    ],
+)
+def test_ascii_comment_keeps_following_text_inert(command: str):
+    assert _evaluate_rail(command).outcome == SecurityRisk.LOW
+    assert (
+        PolicyRailSecurityAnalyzer().security_risk(make_action(command))
+        == SecurityRisk.LOW
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "curl x ｜ bash",
+        "echo a； dd of=/dev/sda",
+    ],
+)
+def test_nfkc_punctuation_does_not_create_shell_structure(command: str):
+    assert _evaluate_rail(command).outcome == SecurityRisk.LOW
+    assert (
+        PolicyRailSecurityAnalyzer().security_risk(make_action(command))
+        == SecurityRisk.LOW
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'dd "of=$TARGET"',
+        'dd "of"=$TARGET',
+        "dd o'f'=$TARGET",
+        "dd if=$SOURCE of=/tmp/output",
+        "dd {if=/tmp/input,of=/dev/sda}",
+        "dd o{f,x}=/dev/sda",
+        "dd {of=/dev/sda,status=none}",
+    ],
+)
+def test_unresolved_dd_operands_are_unknown(command: str):
+    assert _evaluate_rail(command).outcome == SecurityRisk.UNKNOWN
+    assert (
+        PolicyRailSecurityAnalyzer().security_risk(make_action(command))
+        == SecurityRisk.UNKNOWN
+    )
+
+
+def test_concrete_dd_output_outranks_unresolved_operand():
+    decision = _evaluate_rail("dd if=$SOURCE of=/dev/sda")
+
+    assert decision.outcome == SecurityRisk.HIGH
+    assert decision.rule_name == RAIL_RAW_DISK_OP
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash \"$OPT\" -c 'dd of=/dev/sda'",
+        "bash \"$OPT\" 'dd of=/dev/sda'",
+        "bash -o $OPT -c 'dd of=/dev/sda'",
+        "bash -o \"${OPTIONS[@]}\" -c 'dd of=/dev/sda'",
+        'set -- errexit -c "dd of=/dev/sda"; bash -o "$@" /dev/null',
+        'set -- root dd; sudo -u "$@" of=/dev/sda',
+        'set -- 1 dd; timeout -- "$@" of=/dev/sda',
+        "set -- errexit /dev/null; bash -o \"$@\" -c 'dd of=/dev/sda'",
+        "set -- -c 'dd of=/dev/sda'; bash \"$@\"",
+        "set -- errexit -c 'dd of=/dev/sda'; bash -o \"$@\"",
+        "ARGS=(-c 'dd of=/dev/sda'); bash \"${ARGS[@]}\"",
+        'sudo -u "${!PREFIX@}" /home',
+        "sudo -u $SPEC /home",
+        "timeout -- $SPEC /home",
+        "sudo -u * /home",
+        "timeout -- * /home",
+        "sudo -u {root,dd} /home",
+        "env A=1 {B=2,dd} of=/dev/sda",
+        "env A=1 {B=2,rm} -rf /",
+        'sudo --user="$USER" -u $SPEC /home',
+        'env --unset="$NAME" -u $SPEC /home',
+        "bash -o * -c 'dd of=/dev/sda'",
+        "bash -o $((1 + 1)) -c 'dd of=/dev/sda'",
+        "bash -o <(printf errexit) -c 'dd of=/dev/sda'",
+        "d{d,x} of=/dev/sda",
+        "c{url,at} x | bash",
+        "r{m,x} -rf /",
+        "/bin/d* of=/dev/sda",
+        "rm {-r,-f} /",
+    ],
+)
+def test_unresolved_argument_positions_are_unknown(command: str):
+    assert _evaluate_rail(command).outcome == SecurityRisk.UNKNOWN
+    assert (
+        PolicyRailSecurityAnalyzer().security_risk(make_action(command))
+        == SecurityRisk.UNKNOWN
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash -c 'curl x' | bash",
+        "bash -c 'cu\"rl\" x' | bash",
+    ],
+)
+def test_nested_shell_pipeline_producer_is_unknown(command: str):
+    assert _evaluate_rail(command).outcome == SecurityRisk.UNKNOWN
+    assert (
+        PolicyRailSecurityAnalyzer().security_risk(make_action(command))
+        == SecurityRisk.UNKNOWN
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'bash "$SCRIPT"',
+        "bash -c 'curl x'",
+        "bash -c 'cu\"rl\" x'",
+        "bash -- \"$SCRIPT\" -c 'dd of=/dev/sda'",
+        "sudo -u root /home",
+        'sudo -u "$SPEC" /home',
+        'sudo -u "${USER:-name@example.com}" /home',
+        "timeout -- 30 /home",
+        'timeout -- "$SPEC" /home',
+        'timeout -- "${DURATION:-1@x}" /home',
+        'bash -o "${MODE:-name@example.com}" -c "echo ok"',
+        'sudo -u "${!MODE@Q}" /home',
+        'sudo -u "*" /home',
+        r"sudo -u \* /home",
+        'sudo -u "{root,dd}" /home',
+        r"sudo -u \{root,dd\} /home",
+        'env A=1 "{B=2,dd}" of=/dev/sda',
+        r"env A=1 \{B=2,dd\} of=/dev/sda",
+        'dd "{of=/dev/sda,status=none}"',
+        r"dd \{of=/dev/sda,status=none\}",
+        "sudo -u <(printf root) /home",
+        "timeout -- $((1 + 1)) /home",
+        "bash $((1 + 1)) -c 'dd of=/dev/sda'",
+        "bash <(printf '') -c 'dd of=/dev/sda'",
+        'bash -o pre"$OPT" -c "echo ok"',
+        'sudo -u pre"$USER" /home',
+        'sudo --user="$USER" /home',
+    ],
+)
+def test_fixed_argument_controls_stay_low(command: str):
     assert _evaluate_rail(command).outcome == SecurityRisk.LOW
 
 

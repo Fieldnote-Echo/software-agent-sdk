@@ -361,11 +361,14 @@ def _normalize(text: str) -> str:
     Does NOT cover Cyrillic homoglyphs or combining-mark evasion
     (documented as strict xfails, deferred to follow-up).
     """
-    return re.sub(r"\s+", " ", _normalize_shell_source(text))
-
-
-def _normalize_shell_source(text: str) -> str:
-    """Normalize encoding evasions without changing shell whitespace."""
+    # Stage 1: Null bytes
     text = text.replace("\x00", "")
+
+    # Stage 2: Invisible characters (compiled regex)
     text = _INVISIBLE_RE.sub("", text)
-    return unicodedata.normalize("NFKC", text)
+
+    # Stage 3: NFKC normalization
+    text = unicodedata.normalize("NFKC", text)
+
+    # Stage 4: Collapse whitespace
+    return re.sub(r"\s+", " ", text)

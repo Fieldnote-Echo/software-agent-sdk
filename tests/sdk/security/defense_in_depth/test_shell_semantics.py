@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from openhands.sdk.event import ActionEvent
 from openhands.sdk.llm import MessageToolCall, TextContent
 from openhands.sdk.security.defense_in_depth.pattern import PatternSecurityAnalyzer
@@ -74,6 +76,57 @@ def _nest_in_runners(payload: str, levels: int) -> str:
     for _ in range(levels):
         command = f"bash -c {_double_quoted(command)}"
     return command
+
+
+def test_dynamic_runner_option_boundary_is_uncertain():
+    command = f"bash \"$OPT\" -c '{_DEL_QUOTED}'"
+    result = scan_shell_command(command, _DETECTOR_ID)
+
+    assert result.matched is False
+    assert result.uncertain is True
+    assert PatternSecurityAnalyzer().security_risk(make_action(command)) == (
+        SecurityRisk.UNKNOWN
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"set -- -c '{_DEL_QUOTED}'; bash \"$@\"",
+        f"set -- errexit -c '{_DEL_QUOTED}'; bash -o \"$@\"",
+        f"ARGS=(-c '{_DEL_QUOTED}'); bash \"${{ARGS[@]}}\"",
+    ],
+)
+def test_multi_argument_runner_expansion_is_uncertain(command: str):
+    result = scan_shell_command(command, _DETECTOR_ID)
+
+    assert result.matched is False
+    assert result.uncertain is True
+    assert PatternSecurityAnalyzer().security_risk(make_action(command)) == (
+        SecurityRisk.UNKNOWN
+    )
+
+
+def test_multi_argument_command_name_is_uncertain():
+    command = f"r{{m,x}} {_RF} /"
+    result = scan_shell_command(command, _DETECTOR_ID)
+
+    assert result.matched is False
+    assert result.uncertain is True
+    assert PatternSecurityAnalyzer().security_risk(make_action(command)) == (
+        SecurityRisk.UNKNOWN
+    )
+
+
+def test_multi_argument_rm_flags_are_uncertain():
+    command = "rm {-r,-f} /"
+    result = scan_shell_command(command, _DETECTOR_ID)
+
+    assert result.matched is False
+    assert result.uncertain is True
+    assert PatternSecurityAnalyzer().security_risk(make_action(command)) == (
+        SecurityRisk.UNKNOWN
+    )
 
 
 class TestDetectorIdentity:
