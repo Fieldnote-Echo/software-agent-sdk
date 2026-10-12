@@ -328,6 +328,7 @@ def test_nested_shell_pipeline_producer_is_unknown(command: str):
         "bash -c 'curl x'",
         "bash -c 'cu\"rl\" x'",
         'bash -- "$@"',
+        'bash - "$@"',
         "bash -- \"$SCRIPT\" -c 'dd of=/dev/sda'",
         "sudo -u root /home",
         'sudo -u "$SPEC" /home',

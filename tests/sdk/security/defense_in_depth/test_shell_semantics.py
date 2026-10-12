@@ -110,8 +110,8 @@ def test_multi_argument_runner_expansion_is_uncertain(command: str):
     )
 
 
-def test_multi_argument_operand_without_script_flag_is_not_scanned():
-    command = 'bash -- "$@"'
+@pytest.mark.parametrize("command", ['bash -- "$@"', 'bash - "$@"'])
+def test_multi_argument_operand_without_script_flag_is_not_scanned(command: str):
     result = scan_shell_command(command, _DETECTOR_ID)
 
     assert result.matched is False
