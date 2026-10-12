@@ -104,6 +104,16 @@ _DOUBLE_QUOTE_ESCAPABLE: Final[frozenset[str]] = frozenset('$`"\\')
 
 
 @dataclass(frozen=True, slots=True)
+class CommandSemantics:
+    """Static argv facts for the effective command."""
+
+    basename: str | None
+    arguments: tuple[str | None, ...]
+    argument_words: tuple[ShellWord, ...]
+    uncertain: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class ShellScanResult:
     """Outcome of an AST-backed shell scan.
 
@@ -174,6 +184,32 @@ def _safe_parse(command: str) -> ShellProgram | None:
     return None
 
 
+def resolve_command(command: ShellCommand) -> CommandSemantics:
+    """Resolve a command name and its literal arguments."""
+    name_literal = (
+        _resolve_node_literal(command.name.node) if command.name is not None else None
+    )
+    return CommandSemantics(
+        basename=_posix_basename(name_literal) if name_literal is not None else None,
+        arguments=tuple(_resolve_node_literal(word.node) for word in command.words),
+        argument_words=command.words,
+        uncertain=command.name is not None and name_literal is None,
+    )
+
+
+def has_recursive_force_flags(command: CommandSemantics) -> bool:
+    """Return whether a resolved command has recursive and force flags."""
+    flags = _collect_literal_flags(command.arguments)
+    return ("r" in flags or "R" in flags) and "f" in flags
+
+
+def static_shell_script(command: CommandSemantics) -> tuple[bool, str | None]:
+    """Return the static script for a resolved shell ``-c`` invocation."""
+    if command.basename not in _SHELL_RUNNERS:
+        return False, None
+    return _extract_script_operand(command.arguments)
+
+
 def _program_signal(program: ShellProgram, depth: int) -> SignalOutput:
     """Return the scan signal for a parsed program.
 
@@ -183,11 +219,11 @@ def _program_signal(program: ShellProgram, depth: int) -> SignalOutput:
     """
     uncertain = False
     for command in ast_view.iter_commands(program):
-        resolved = _resolve_command_basename(command)
-        if _has_recursive_force_flags(command):
-            if resolved == _RM_BASENAME:
+        resolved = resolve_command(command)
+        if has_recursive_force_flags(resolved):
+            if resolved.basename == _RM_BASENAME:
                 return _MATCH_SIGNAL
-            if resolved is None or command.has_error:
+            if resolved.basename is None or command.has_error:
                 # Dangerous flag shape on a verb we cannot vouch for:
                 # either the name is unresolvable, or an ERROR/MISSING
                 # parse node intersects this command, so the resolved verb
@@ -201,15 +237,7 @@ def _program_signal(program: ShellProgram, depth: int) -> SignalOutput:
     return SignalOutput(matched=False, uncertain=uncertain)
 
 
-def _has_recursive_force_flags(command: ShellCommand) -> bool:
-    """Return whether ``command`` carries recursive and force flags together."""
-    flags = _collect_flags(command.words)
-    has_recursive = "r" in flags or "R" in flags
-    has_force = "f" in flags
-    return has_recursive and has_force
-
-
-def _collect_flags(words: tuple[ShellWord, ...]) -> set[str]:
+def _collect_literal_flags(arguments: tuple[str | None, ...]) -> set[str]:
     """Collect short-flag chars and recognised long flags.
 
     Option words are resolved through the same quote-removal path as the
@@ -222,7 +250,7 @@ def _collect_flags(words: tuple[ShellWord, ...]) -> set[str]:
 
     A word that is dynamic (command substitution, expansion, ANSI-C string)
     stays unresolved and contributes no flags. That matches how an
-    unresolvable script operand is treated in ``_scan_script_operand``:
+    unresolvable script operand is treated in ``static_shell_script()``:
     passing flags through a variable is ordinary benign usage, and flagging it
     would flood the ensemble with UNKNOWNs.
 
@@ -232,8 +260,7 @@ def _collect_flags(words: tuple[ShellWord, ...]) -> set[str]:
     their short-flag character so ordering and mixing work.
     """
     flags: set[str] = set()
-    for word in words:
-        literal = _resolve_node_literal(word.node)
+    for literal in arguments:
         if literal is None:
             continue
         if literal == _END_OF_OPTIONS:
@@ -248,7 +275,7 @@ def _collect_flags(words: tuple[ShellWord, ...]) -> set[str]:
 
 def _nested_signal(
     command: ShellCommand,
-    resolved_name: str | None,
+    resolved: CommandSemantics,
     depth: int,
 ) -> SignalOutput:
     """Descend into a shell runner script operand and re-parse it.
@@ -263,45 +290,26 @@ def _nested_signal(
     scan just read cannot be trusted, so a silent LOW would vouch for
     something never actually seen.
     """
-    if resolved_name not in _SHELL_RUNNERS:
+    if resolved.basename not in _SHELL_RUNNERS:
         return _NO_SIGNAL
-
-    operand = _scan_script_operand(command, depth)
-    if operand.matched:
-        return _MATCH_SIGNAL
+    has_script, inner = static_shell_script(resolved)
+    if has_script and inner is not None:
+        if depth >= _MAX_NESTING_DEPTH:
+            return _UNCERTAIN_SIGNAL
+        inner_program = _safe_parse(inner)
+        if inner_program is not None:
+            nested = _program_signal(inner_program, depth + 1)
+            if nested.matched:
+                return _MATCH_SIGNAL
+            if nested.uncertain:
+                return _UNCERTAIN_SIGNAL
     if command.has_error:
         return _UNCERTAIN_SIGNAL
-    return operand
-
-
-def _scan_script_operand(command: ShellCommand, depth: int) -> SignalOutput:
-    """Extract, bound-check, and recursively scan a runner script operand.
-
-    A dynamic (unresolvable) script operand is deliberately NOT treated as
-    uncertain: passing a shell variable as the script is ordinary benign
-    usage, and flagging it would flood the caller with UNKNOWNs. Uncertainty
-    is reserved for the direct destructive-flags-on-unvouchable-verb shape
-    in ``_program_signal`` and the depth bound below.
-    """
-    has_flag, inner = _extract_script_operand(command)
-    if not has_flag or inner is None:
-        return _NO_SIGNAL
-
-    if depth >= _MAX_NESTING_DEPTH:
-        # Depth bound hit with a real script operand still unscanned: we
-        # refused to look, so we cannot vouch. Surface uncertainty (the
-        # analyzer emits UNKNOWN) rather than a silent LOW that would hand
-        # attackers a constructive bypass one nesting level past the bound.
-        return _UNCERTAIN_SIGNAL
-
-    inner_program = _safe_parse(inner)
-    if inner_program is None:
-        return _NO_SIGNAL
-    return _program_signal(inner_program, depth + 1)
+    return _NO_SIGNAL
 
 
 def _extract_script_operand(
-    command: ShellCommand,
+    arguments: tuple[str | None, ...],
 ) -> tuple[bool, str | None]:
     """Locate the runner script operand using POSIX argv option semantics.
 
@@ -322,10 +330,9 @@ def _extract_script_operand(
     """
     has_script_flag = False
     options_ended = False
-    words = command.words
     index = 0
-    while index < len(words):
-        literal = _resolve_node_literal(words[index].node)
+    while index < len(arguments):
+        literal = arguments[index]
         if literal is None:
             # A dynamic argv word cannot be classified as option or operand
             # at analysis time. Treat it as the first operand: a dynamic
@@ -382,22 +389,6 @@ def _consumes_next_word(literal: str) -> bool:
     return literal[-1] in _SHORT_OPTS_WITH_ARG
 
 
-def _resolve_command_basename(command: ShellCommand) -> str | None:
-    """Resolve a command name to its POSIX basename, seeing through quotes.
-
-    A bare verb resolves to itself; a path-qualified verb resolves to its
-    final segment; a quoted verb resolves to the de-quoted text. Returns
-    None when the name is dynamic (command substitution, expansion, ANSI-C
-    string) or absent.
-    """
-    if command.name is None:
-        return None
-    literal = _resolve_node_literal(command.name.node)
-    if literal is None:
-        return None
-    return _posix_basename(literal)
-
-
 def _resolve_node_literal(node: Node) -> str | None:
     """Concatenate literal text from a name/word node, or None if dynamic.
 
@@ -425,7 +416,7 @@ def _collect_literal_parts(node: Node) -> list[str] | None:
         return None
 
     match node.type:
-        case "word":
+        case "word" | "number":
             return [_unescape_unquoted(_decode(node.text))]
 
         case "raw_string":
