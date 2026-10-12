@@ -509,6 +509,10 @@ def _extract_script_operand(
             if _is_option_word(literal):
                 if _sets_script_flag(literal):
                     has_script_flag = True
+                if not literal.startswith(_END_OF_OPTIONS) and any(
+                    flag in _SHORT_OPTS_WITH_ARG for flag in literal[1:-1]
+                ):
+                    return has_script_flag, None, True
                 if _consumes_next_word(literal):
                     value_index = index + 1
                     if value_index < len(arguments) and (
@@ -539,12 +543,13 @@ def _is_option_word(literal: str) -> bool:
 def _sets_script_flag(literal: str) -> bool:
     """Return whether a short-option group contains the script flag.
 
-    Only ``-`` groups can set it: ``--long`` words are not short groups,
-    and ``+`` groups unset options rather than set them.
+    A single ``-`` or ``+`` prefix starts a short-option group. Repeated
+    prefixes do not.
     """
     return (
-        literal.startswith(_BARE_DASH)
-        and not literal.startswith(_END_OF_OPTIONS)
+        len(literal) > 1
+        and literal[0] in _OPTION_PREFIXES
+        and literal[1] not in _OPTION_PREFIXES
         and _SCRIPT_FLAG_CHAR in literal[1:]
     )
 
@@ -552,9 +557,8 @@ def _sets_script_flag(literal: str) -> bool:
 def _consumes_next_word(literal: str) -> bool:
     """Return whether an option word takes the next word as its argument.
 
-    For short groups the argument-taking option must be the last character
-    (``-o errexit``); anywhere else the group is malformed and the runner
-    would reject it, so nothing is consumed.
+    A final short ``o`` or ``O`` consumes the next word. The caller treats an
+    earlier argument-taking flag as an unsupported option boundary.
     """
     if literal in _LONG_OPTS_WITH_ARG:
         return True

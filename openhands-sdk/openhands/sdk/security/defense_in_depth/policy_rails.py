@@ -268,6 +268,13 @@ def _resolve_wrappers(command: CommandSemantics) -> CommandSemantics:
                 return replace(command, uncertain=True)
             index += value_count + 1
 
+        if (
+            command.basename == "env"
+            and index < len(command.arguments)
+            and command.arguments[index] == "-"
+        ):
+            index += 1
+
         if command.basename in _ASSIGNMENT_WRAPPERS:
             while index < len(command.arguments):
                 argument = command.arguments[index]

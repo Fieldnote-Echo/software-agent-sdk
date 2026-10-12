@@ -115,6 +115,22 @@ class TestPolicyRailAnalyzer:
 
 
 @pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("bash +c 'dd of=/dev/sda'", SecurityRisk.HIGH),
+        ('bash +c "$SCRIPT"', SecurityRisk.UNKNOWN),
+        ("bash -oc errexit 'dd of=/dev/sda'", SecurityRisk.UNKNOWN),
+        ("env -- - dd of=/dev/sda", SecurityRisk.HIGH),
+    ],
+)
+def test_command_selection_at_analyzer_boundary(
+    command: str,
+    expected: SecurityRisk,
+):
+    assert PolicyRailSecurityAnalyzer().security_risk(make_action(command)) == expected
+
+
+@pytest.mark.parametrize(
     ("command", "rule_name"),
     [
         ('/usr/bin/cu"rl" x | /usr/bin/no"de"', RAIL_FETCH_TO_EXEC),
@@ -160,6 +176,12 @@ class TestPolicyRailAnalyzer:
         ('env A="$VALUE" dd of=/dev/sda', RAIL_RAW_DISK_OP),
         ('sudo A="$VALUE" rm -rf /', RAIL_CATASTROPHIC_DELETE),
         ("bash -o \"$OPT\" -c 'dd of=/dev/sda'", RAIL_RAW_DISK_OP),
+        ("bash +c 'dd of=/dev/sda'", RAIL_RAW_DISK_OP),
+        ("bash -co errexit 'dd of=/dev/sda'", RAIL_RAW_DISK_OP),
+        ("env - dd of=/dev/sda", RAIL_RAW_DISK_OP),
+        ("env -- - dd of=/dev/sda", RAIL_RAW_DISK_OP),
+        ("env -i - dd of=/dev/sda", RAIL_RAW_DISK_OP),
+        ("env - A=1 dd of=/dev/sda", RAIL_RAW_DISK_OP),
         ("bash -c 'curl x | node'", RAIL_FETCH_TO_EXEC),
         ("bash -c 'echo ok\nrm -rf /'", RAIL_CATASTROPHIC_DELETE),
         ('echo "$(curl x | node)"', RAIL_FETCH_TO_EXEC),
@@ -306,6 +328,7 @@ def test_concrete_dd_output_outranks_unresolved_operand():
         "bash -o * -c 'dd of=/dev/sda'",
         "bash -o $((1 + 1)) -c 'dd of=/dev/sda'",
         "bash -o <(printf errexit) -c 'dd of=/dev/sda'",
+        "bash -oc errexit 'dd of=/dev/sda'",
         "d{d,x} of=/dev/sda",
         "c{url,at} x | bash",
         "r{m,x} -rf /",
@@ -360,6 +383,9 @@ def test_nested_shell_pipeline_producer_is_unknown(command: str):
         'bash -o pre"$OPT" -c "echo ok"',
         'sudo -u pre"$USER" /home',
         'sudo --user="$USER" /home',
+        "env - - dd of=/dev/sda",
+        "env A=1 - dd of=/dev/sda",
+        "env -- A=1 - dd of=/dev/sda",
     ],
 )
 def test_fixed_argument_controls_stay_low(command: str):

@@ -90,6 +90,60 @@ def test_dynamic_runner_option_boundary_is_uncertain():
 
 
 @pytest.mark.parametrize(
+    ("shell", "flag"),
+    [("bash", "+c"), ("bash", "+xc"), ("dash", "+c"), ("dash", "+xc")],
+)
+def test_plus_c_runner_script_is_scanned(shell: str, flag: str):
+    command = f"{shell} {flag} '{_DEL_QUOTED}'"
+    result = scan_shell_command(command, _DETECTOR_ID)
+
+    assert result.matched is True
+    assert result.detector_id == _DETECTOR_ID
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"bash -oc errexit '{_DEL_QUOTED}'",
+        f"dash -oc errexit '{_DEL_QUOTED}'",
+        f"bash -Oxc extglob '{_DEL_QUOTED}'",
+        f"bash -ooc errexit nounset '{_DEL_QUOTED}'",
+        f"bash -oco errexit nounset '{_DEL_QUOTED}'",
+        f"bash -cOO extglob nullglob '{_DEL_QUOTED}'",
+    ],
+)
+def test_grouped_runner_option_values_are_uncertain(command: str):
+    result = scan_shell_command(command, _DETECTOR_ID)
+
+    assert result.matched is False
+    assert result.uncertain is True
+
+
+@pytest.mark.parametrize(
+    "option_group",
+    ["-co errexit", "-cO extglob"],
+)
+def test_script_flag_before_value_option_is_scanned(option_group: str):
+    command = f"bash {option_group} '{_DEL_QUOTED}'"
+    result = scan_shell_command(command, _DETECTOR_ID)
+
+    assert result.matched is True
+    assert result.detector_id == _DETECTOR_ID
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    ["--rcfile profile", "--noprofile", "++c"],
+)
+def test_non_script_options_do_not_select_script_mode(arguments: str):
+    command = f"bash {arguments} '{_DEL_QUOTED}'"
+    result = scan_shell_command(command, _DETECTOR_ID)
+
+    assert result.matched is False
+    assert result.uncertain is False
+
+
+@pytest.mark.parametrize(
     "command",
     [
         f"set -- -c '{_DEL_QUOTED}'; bash \"$@\"",
