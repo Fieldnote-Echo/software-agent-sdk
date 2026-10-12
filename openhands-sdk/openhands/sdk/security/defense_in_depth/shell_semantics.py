@@ -13,8 +13,8 @@ relevant structure. The analyzer can then emit ``UNKNOWN`` rather than a false
 
 - the destructive flag shape appears on a command whose verb cannot be
   resolved;
-- a dynamic argument or unsupported option group prevents safe selection of a
-  shell runner's script operand;
+- a dynamic argument or unsupported option group prevents safe selection of
+  directly executed shell source;
 - an ERROR/MISSING parse node intersects a command span the detector uses; or
 - the nested-runner depth bound is hit with a script operand still unscanned.
 
@@ -27,7 +27,8 @@ unchanged.
 from __future__ import annotations
 
 import contextlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from fnmatch import fnmatchcase
 from typing import Final
 
 from tree_sitter import Node
@@ -68,11 +69,24 @@ _OPTION_PREFIXES: Final[frozenset[str]] = frozenset({"-", "+"})
 # option argument as the first operand and stop looking for the script flag.
 _SHORT_OPTS_WITH_ARG: Final[frozenset[str]] = frozenset({"o", "O"})
 
-# Runner long options that consume the next word as their argument. Exotic
-# long options beyond these are out of scope: an unrecognized long option is
-# treated as argumentless, which at worst misreads its argument as the first
-# operand and stops descending -- it never over-descends.
+# Runner long options that consume the next word as their argument. An
+# unrecognized long option makes command selection uncertain.
 _LONG_OPTS_WITH_ARG: Final[frozenset[str]] = frozenset({"--rcfile", "--init-file"})
+
+_LONG_OPTS_WITHOUT_ARG: Final[frozenset[str]] = frozenset(
+    {
+        "--debugger",
+        "--login",
+        "--noediting",
+        "--noprofile",
+        "--norc",
+        "--posix",
+        "--restricted",
+        "--verbose",
+    }
+)
+
+_SHORT_RUNNER_OPTIONS: Final[frozenset[str]] = frozenset("abefhkmnptuvxBCDHPcilrsoO")
 
 # Long-flag names mapped onto their short-flag characters below.
 _LONG_RECURSIVE: Final[str] = "recursive"
@@ -117,6 +131,18 @@ _DEFINITE_NON_OPTION_NODE_TYPES: Final[frozenset[str]] = frozenset(
     {"arithmetic_expansion", "process_substitution"}
 )
 
+_RM_OPTION_PATTERNS: Final[tuple[tuple[str, frozenset[str]], ...]] = (
+    ("-r", frozenset("r")),
+    ("-R", frozenset("R")),
+    ("-f", frozenset("f")),
+    ("-rf", frozenset("rf")),
+    ("-fr", frozenset("rf")),
+    ("-Rf", frozenset("Rf")),
+    ("-fR", frozenset("Rf")),
+    ("--recursive", frozenset("r")),
+    ("--force", frozenset("f")),
+)
+
 
 @dataclass(frozen=True, slots=True)
 class CommandSemantics:
@@ -126,6 +152,8 @@ class CommandSemantics:
     arguments: tuple[str | None, ...]
     argument_words: tuple[ShellWord, ...]
     uncertain: bool = False
+    can_invoke_shell_builtin: bool = True
+    can_invoke_shell_keyword: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,7 +198,7 @@ def scan_shell_command(command: str, rm_detector_id: str) -> ShellScanResult:
     """Scan ``command`` for AST-resolvable destructive shell commands.
 
     Resolves each simple command name through quotes and path prefixes,
-    descends into shell-runner script operands, and reports a match for the
+    descends into directly executed shell source, and reports a match for the
     recursive force-delete family.
 
     Uncertainty is reported narrowly. It applies when the scan cannot verify a
@@ -199,12 +227,25 @@ def _safe_parse(command: str) -> ShellProgram | None:
 
 def resolve_command(command: ShellCommand) -> CommandSemantics:
     """Resolve a command name and its literal arguments."""
+    name_word = command.name
+    argument_words = command.words
+    if (
+        name_word is not None
+        and name_word.text.isdecimal()
+        and argument_words
+        and any(
+            name_word.node.end_byte == redirect.start_byte
+            for redirect, _ in _command_redirects(command)
+        )
+    ):
+        name_word = argument_words[0]
+        argument_words = argument_words[1:]
     name_literal = (
-        _resolve_node_literal(command.name.node) if command.name is not None else None
+        _resolve_node_literal(name_word.node) if name_word is not None else None
     )
-    name_arity_uncertain = command.name is not None and argument_arity_is_uncertain(
+    name_arity_uncertain = name_word is not None and argument_arity_is_uncertain(
         name_literal,
-        command.name,
+        name_word,
     )
     return CommandSemantics(
         basename=(
@@ -212,10 +253,17 @@ def resolve_command(command: ShellCommand) -> CommandSemantics:
             if name_literal is not None and not name_arity_uncertain
             else None
         ),
-        arguments=tuple(_resolve_node_literal(word.node) for word in command.words),
-        argument_words=command.words,
+        arguments=tuple(_resolve_node_literal(word.node) for word in argument_words),
+        argument_words=argument_words,
         uncertain=(
-            command.name is not None and (name_literal is None or name_arity_uncertain)
+            name_word is not None and (name_literal is None or name_arity_uncertain)
+        ),
+        can_invoke_shell_builtin=(name_literal is not None and "/" not in name_literal),
+        can_invoke_shell_keyword=(
+            name_literal is not None
+            and name_word is not None
+            and name_word.text == name_literal
+            and "/" not in name_literal
         ),
     )
 
@@ -230,7 +278,128 @@ def static_shell_script(command: CommandSemantics) -> tuple[bool, str | None, bo
     """Return the script and option-boundary uncertainty for a shell runner."""
     if command.basename not in _SHELL_RUNNERS:
         return False, None, False
-    return _extract_script_operand(command.arguments, command.argument_words)
+    return _extract_script_operand(
+        command.arguments,
+        command.argument_words,
+        command.basename,
+    )
+
+
+def static_executable_shell_source(
+    syntax: ShellCommand,
+    command: CommandSemantics,
+) -> tuple[bool, str | None, bool]:
+    """Return shell source that the command executes directly."""
+    runner_command = _without_redirect_descriptor_words(syntax, command)
+    has_script, script, uncertain = static_shell_script(runner_command)
+    if has_script or uncertain:
+        return has_script, script, uncertain
+
+    eval_command, eval_uncertain = _effective_eval_command(runner_command)
+    if eval_uncertain:
+        return True, None, True
+    if eval_command is not None:
+        arguments = eval_command.arguments
+        words = eval_command.argument_words
+        if arguments and arguments[0] == _END_OF_OPTIONS:
+            arguments = arguments[1:]
+            words = words[1:]
+        elif arguments and arguments[0] is not None and arguments[0].startswith("-"):
+            return False, None, False
+        if not arguments:
+            return False, None, False
+        if any(
+            argument is None or argument_arity_is_uncertain(argument, word)
+            for argument, word in zip(
+                arguments,
+                words,
+                strict=True,
+            )
+        ):
+            return True, None, True
+        literal_arguments = [argument for argument in arguments if argument is not None]
+        return True, " ".join(literal_arguments), False
+
+    if runner_command.basename not in _SHELL_RUNNERS:
+        return False, None, False
+    has_source, source, source_uncertain = _static_standard_input_source(syntax)
+    if not has_source:
+        return False, None, False
+    reads_standard_input = _runner_reads_standard_input(runner_command)
+    if reads_standard_input is None:
+        return True, None, True
+    if not reads_standard_input:
+        return False, None, False
+    return True, source, source_uncertain
+
+
+def standard_output_reaches_pipeline(command: ShellCommand) -> bool | None:
+    """Return whether the command's standard output still reaches its pipe."""
+    pipe_output: dict[str, bool | None] = {"1": True, "2": False}
+    for redirect, descriptor in _command_redirects(command):
+        target_fd = _normalize_descriptor(descriptor)
+        redirect_text = _decode(redirect.text).lstrip("0123456789")
+        if redirect_text.startswith(("&>", "&>>")):
+            pipe_output["1"] = False
+            pipe_output["2"] = False
+            continue
+        if redirect_text.startswith((">&", "<&")):
+            destination = _redirect_destination(redirect)
+            if destination == "-":
+                pipe_output[target_fd] = False
+            elif destination is not None and destination.isdecimal():
+                pipe_output[target_fd] = pipe_output.get(
+                    _normalize_descriptor(destination),
+                    False,
+                )
+            else:
+                pipe_output[target_fd] = None
+            continue
+        pipe_output[target_fd] = False
+    return pipe_output["1"]
+
+
+def _effective_eval_command(
+    command: CommandSemantics,
+) -> tuple[CommandSemantics | None, bool]:
+    for depth in range(_MAX_NESTING_DEPTH + 1):
+        if not command.can_invoke_shell_builtin:
+            return None, False
+        if command.basename == "eval":
+            return command, False
+        if command.basename not in {"builtin", "command"}:
+            return None, False
+        if depth == _MAX_NESTING_DEPTH:
+            return None, True
+
+        index = 0
+        if command.basename == "command":
+            while index < len(command.arguments) and command.arguments[index] == "-p":
+                index += 1
+            if (
+                index < len(command.arguments)
+                and command.arguments[index] == _END_OF_OPTIONS
+            ):
+                index += 1
+        elif command.arguments and command.arguments[0] == _END_OF_OPTIONS:
+            index = 1
+        if index >= len(command.arguments):
+            return None, False
+
+        target = command.arguments[index]
+        target_word = command.argument_words[index]
+        if target is None or argument_arity_is_uncertain(target, target_word):
+            return None, True
+        if target.startswith("-") or "/" in target:
+            return None, False
+        command = replace(
+            command,
+            basename=target,
+            arguments=command.arguments[index + 1 :],
+            argument_words=command.argument_words[index + 1 :],
+            can_invoke_shell_keyword=False,
+        )
+    return None, True
 
 
 def argument_arity_is_uncertain(
@@ -305,8 +474,15 @@ def _contains_multi_argument_expansion(node: Node) -> bool:
 
 def _contains_unquoted_arity_syntax(text: str) -> bool:
     """Detect unquoted pathname and brace expansion syntax in one shell word."""
+    return any(_unquoted_expansion_syntax(text))
+
+
+def _unquoted_expansion_syntax(text: str) -> tuple[bool, bool]:
+    """Return whether a word contains pathname or brace expansion syntax."""
     bracket_open = False
     brace_expands: list[bool] = []
+    pathname_expands = False
+    has_brace_expansion = False
     quote: str | None = None
     index = 0
     while index < len(text):
@@ -337,20 +513,21 @@ def _contains_unquoted_arity_syntax(text: str) -> bool:
         if character in {"'", '"'}:
             quote = character
         elif character in {"*", "?"}:
-            return True
+            pathname_expands = True
         elif character == "[":
             bracket_open = True
         elif character == "]" and bracket_open:
-            return True
+            pathname_expands = True
+            bracket_open = False
         elif character == "{":
             brace_expands.append(False)
         elif character == "}" and brace_expands:
             if brace_expands.pop():
-                return True
+                has_brace_expansion = True
         elif brace_expands and (character == "," or text.startswith("..", index)):
             brace_expands[-1] = True
         index += 1
-    return False
+    return pathname_expands, has_brace_expansion
 
 
 def _program_signal(program: ShellProgram, depth: int) -> SignalOutput:
@@ -373,13 +550,8 @@ def _program_signal(program: ShellProgram, depth: int) -> SignalOutput:
                 # may not be the verb the shell would run. Keep scanning
                 # for a concrete match first.
                 uncertain = True
-        elif resolved.basename == _RM_BASENAME and any(
-            literal is not None and argument_arity_is_uncertain(literal, word)
-            for literal, word in zip(
-                resolved.arguments,
-                resolved.argument_words,
-                strict=True,
-            )
+        elif resolved.basename == _RM_BASENAME and _has_uncertain_recursive_force_flags(
+            resolved
         ):
             uncertain = True
         nested = _nested_signal(command, resolved, depth)
@@ -425,26 +597,147 @@ def _collect_literal_flags(arguments: tuple[str | None, ...]) -> set[str]:
     return flags
 
 
+def _has_uncertain_recursive_force_flags(command: CommandSemantics) -> bool:
+    flags = _collect_literal_flags(command.arguments)
+    for literal, word in zip(
+        command.arguments,
+        command.argument_words,
+        strict=True,
+    ):
+        if literal == _END_OF_OPTIONS:
+            break
+        if literal is None or not argument_arity_is_uncertain(literal, word):
+            continue
+        pathname_expands, brace_expands = _unquoted_expansion_syntax(word.text)
+        brace_can_start_option, brace_flags = _leading_brace_option_flags(literal)
+        can_start_option = (
+            literal.startswith("-")
+            or (pathname_expands and _pathname_can_start_option(word.text))
+            or (brace_expands and brace_can_start_option)
+        )
+        if pathname_expands and can_start_option:
+            flags.update(_pathname_option_flags(literal))
+        elif literal.startswith("-"):
+            flags.update(character for character in literal if character in "rRf")
+        elif brace_expands:
+            flags.update(brace_flags)
+    return ("r" in flags or "R" in flags) and "f" in flags
+
+
+def _pathname_can_start_option(text: str) -> bool:
+    quote: str | None = None
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if quote is not None:
+            if character == quote:
+                quote = None
+                index += 1
+                continue
+            return character == "-"
+        if character == "\\" and index + 1 < len(text):
+            return text[index + 1] == "-"
+        if character in {"'", '"'}:
+            quote = character
+            index += 1
+            continue
+        return character in {"-", "*", "?", "["}
+    return False
+
+
+def _pathname_option_flags(pattern: str) -> set[str]:
+    if pattern.startswith("-"):
+        return set("rRf")
+    if "[^" in pattern or "[[:" in pattern:
+        return set("rRf")
+    flags: set[str] = set()
+    for option, option_flags in _RM_OPTION_PATTERNS:
+        if fnmatchcase(option, pattern):
+            flags.update(option_flags)
+    return flags
+
+
+def _leading_brace_option_flags(
+    literal: str,
+    recursion_depth: int = 0,
+) -> tuple[bool, set[str]]:
+    if not literal.startswith("{"):
+        return False, set()
+    if recursion_depth >= _MAX_NESTING_DEPTH:
+        return "-" in literal, {
+            character for character in literal if character in "rRf"
+        }
+    brace_depth = 0
+    for index, character in enumerate(literal[1:], start=1):
+        if character == "{":
+            brace_depth += 1
+        elif character == "}":
+            if brace_depth == 0:
+                alternatives = literal[1:index]
+                suffix = literal[index + 1 :]
+                return _brace_option_flags(
+                    alternatives,
+                    suffix,
+                    recursion_depth,
+                )
+            brace_depth -= 1
+    return False, set()
+
+
+def _brace_option_flags(
+    alternatives: str,
+    suffix: str,
+    recursion_depth: int,
+) -> tuple[bool, set[str]]:
+    can_start_option = False
+    flags: set[str] = set()
+    brace_depth = 0
+    start = 0
+    for index in range(len(alternatives) + 1):
+        character = alternatives[index] if index < len(alternatives) else ","
+        if character == "{":
+            brace_depth += 1
+        elif character == "}":
+            brace_depth -= 1
+        elif character == "," and brace_depth == 0:
+            candidate = alternatives[start:index] + suffix
+            if candidate.startswith("-"):
+                can_start_option = True
+                flags.update(character for character in candidate if character in "rRf")
+            elif candidate.startswith("{"):
+                nested_can_start, nested_flags = _leading_brace_option_flags(
+                    candidate,
+                    recursion_depth + 1,
+                )
+                can_start_option = can_start_option or nested_can_start
+                flags.update(nested_flags)
+            start = index + 1
+    return can_start_option, flags
+
+
 def _nested_signal(
     command: ShellCommand,
     resolved: CommandSemantics,
     depth: int,
 ) -> SignalOutput:
-    """Descend into a shell runner script operand and re-parse it.
+    """Descend into directly executed shell source and re-parse it.
 
     Closes the nested-runner bypass class, including quoted verbs inside the
     script that no outer pattern can see.
 
     Fail-safe ordering: the operand scan runs first so a concrete match
     always wins; only when no match is found does a parse error on the
-    runner's own node force uncertainty -- an ERROR/MISSING there (e.g. an
+    source command's node force uncertainty -- an ERROR/MISSING there (e.g. an
     unclosed quote truncating the script operand) means the argv spans the
     scan just read cannot be trusted, so a silent LOW would vouch for
     something never actually seen.
     """
-    if resolved.basename not in _SHELL_RUNNERS:
-        return _NO_SIGNAL
-    has_script, inner, uncertain = static_shell_script(resolved)
+    source_command = resolved.basename in _SHELL_RUNNERS or resolved.basename in {
+        "eval",
+        "builtin",
+        "command",
+    }
+    has_script, inner, uncertain = static_executable_shell_source(command, resolved)
     if has_script and inner is not None:
         if depth >= _MAX_NESTING_DEPTH:
             return _UNCERTAIN_SIGNAL
@@ -457,14 +750,267 @@ def _nested_signal(
                 return _UNCERTAIN_SIGNAL
     if uncertain:
         return _UNCERTAIN_SIGNAL
-    if command.has_error:
+    if source_command and command.has_error:
         return _UNCERTAIN_SIGNAL
     return _NO_SIGNAL
+
+
+def _runner_reads_standard_input(command: CommandSemantics) -> bool | None:
+    stdin_selected = False
+    noexec = False
+    dump_strings = False
+    options_ended = False
+    index = 0
+    while index < len(command.arguments):
+        literal = command.arguments[index]
+        word = command.argument_words[index]
+        if literal is None or argument_arity_is_uncertain(literal, word):
+            if options_ended:
+                return (
+                    False
+                    if noexec or dump_strings
+                    else (True if stdin_selected else None)
+                )
+            return None
+        if not options_ended:
+            if literal in {_END_OF_OPTIONS, _BARE_DASH}:
+                options_ended = True
+                index += 1
+                continue
+            if _is_option_word(literal):
+                if _is_definitely_invalid_option_word(literal):
+                    return False
+                value_count = _runner_option_value_count(literal, command.basename)
+                if value_count is None:
+                    return None
+                stdin_selected = stdin_selected or _sets_stdin_flag(literal)
+                noexec = _updated_noexec(noexec, literal)
+                dump_strings = dump_strings or _sets_dump_strings(
+                    command.basename,
+                    literal,
+                )
+                if value_count and index + value_count >= len(command.arguments):
+                    return False
+                index += value_count + 1
+                continue
+        return False if noexec or dump_strings else stdin_selected
+    return not (noexec or dump_strings)
+
+
+def _static_standard_input_source(
+    command: ShellCommand,
+) -> tuple[bool, str | None, bool]:
+    sources: dict[str, tuple[bool, str | None, bool]] = {}
+    for redirect, descriptor in _command_redirects(command):
+        target_fd = _normalize_descriptor(descriptor)
+        redirect_text = _decode(redirect.text).lstrip("0123456789")
+        if redirect_text.startswith("<&"):
+            destination = _redirect_destination(redirect)
+            if destination == "-":
+                sources.pop(target_fd, None)
+                continue
+            if destination is not None and destination.isdecimal():
+                source_fd = _normalize_descriptor(destination)
+                if source_fd in sources:
+                    sources[target_fd] = sources[source_fd]
+                else:
+                    sources.pop(target_fd, None)
+                continue
+            if target_fd == "0" or sources:
+                sources[target_fd] = (True, None, True)
+            continue
+        if _is_herestring_redirect(redirect, redirect_text):
+            sources[target_fd] = _static_herestring_source(redirect)
+            continue
+        if redirect.type == "heredoc_redirect":
+            sources[target_fd] = _static_heredoc_source(redirect)
+            continue
+        if redirect_text.startswith("<"):
+            sources.pop(target_fd, None)
+    return sources.get("0", (False, None, False))
+
+
+def _static_herestring_source(redirect: Node) -> tuple[bool, str | None, bool]:
+    values = [
+        child
+        for child in redirect.named_children
+        if child.type not in {"file_descriptor", "ERROR"}
+        and "redirect" not in child.type
+    ]
+    if not values:
+        return True, None, True
+    source = _resolve_node_literal(values[0])
+    return True, source, source is None
+
+
+def _is_herestring_redirect(redirect: Node, text: str) -> bool:
+    if redirect.type == "herestring_redirect" or text.startswith("<<<"):
+        return True
+    previous = redirect.prev_named_sibling
+    return (
+        previous is not None
+        and previous.type == "ERROR"
+        and previous.end_byte == redirect.start_byte
+        and _decode(previous.text) == "<<"
+        and text.startswith("<")
+    )
+
+
+def _redirect_destination(redirect: Node) -> str | None:
+    for index, child in enumerate(redirect.children):
+        if child.is_named and redirect.field_name_for_child(index) == "destination":
+            return _resolve_node_literal(child)
+    return None
+
+
+def _normalize_descriptor(descriptor: str) -> str:
+    if descriptor.isdecimal():
+        return str(int(descriptor))
+    return descriptor
+
+
+def _static_heredoc_source(redirect: Node) -> tuple[bool, str | None, bool]:
+    start = next(
+        (child for child in redirect.named_children if child.type == "heredoc_start"),
+        None,
+    )
+    body = next(
+        (child for child in redirect.named_children if child.type == "heredoc_body"),
+        None,
+    )
+    end = next(
+        (child for child in redirect.named_children if child.type == "heredoc_end"),
+        None,
+    )
+    if start is None or body is None or end is None:
+        return True, None, True
+
+    body_text = _decode(body.text)
+    delimiter_is_quoted = _decode(start.text) != _decode(end.text)
+    if not delimiter_is_quoted and (body.named_children or "\\" in body_text):
+        return True, None, True
+    return True, body_text, False
+
+
+def _without_redirect_descriptor_words(
+    syntax: ShellCommand,
+    command: CommandSemantics,
+) -> CommandSemantics:
+    redirects = _command_redirects(syntax)
+    retained = [
+        (argument, word)
+        for argument, word in zip(
+            command.arguments,
+            command.argument_words,
+            strict=True,
+        )
+        if not (
+            argument is not None
+            and argument.isdecimal()
+            and word.text.isdecimal()
+            and _is_redirect_descriptor_word(argument, word, redirects)
+        )
+    ]
+    if len(retained) == len(command.arguments):
+        return command
+    return replace(
+        command,
+        arguments=tuple(argument for argument, _ in retained),
+        argument_words=tuple(word for _, word in retained),
+    )
+
+
+def _is_redirect_descriptor_word(
+    argument: str,
+    word: ShellWord,
+    redirects: list[tuple[Node, str]],
+) -> bool:
+    for redirect, descriptor in redirects:
+        if _normalize_descriptor(argument) != _normalize_descriptor(descriptor):
+            continue
+        if word.node.end_byte == redirect.start_byte:
+            return True
+        previous = redirect.prev_named_sibling
+        if (
+            previous is not None
+            and previous.type == "ERROR"
+            and _decode(previous.text) == "<<"
+            and word.node.end_byte == previous.start_byte
+            and previous.end_byte == redirect.start_byte
+        ):
+            return True
+    return False
+
+
+def _command_redirects(command: ShellCommand) -> list[tuple[Node, str]]:
+    redirects: list[tuple[Node, str]] = []
+    container = command.node
+    while True:
+        for child in container.named_children:
+            if "redirect" in child.type:
+                _append_redirect_tree(redirects, command, child)
+        parent = container.parent
+        if parent is None or parent.type != "redirected_statement":
+            break
+        container = parent
+
+    parent = command.node.parent
+    sibling = parent.next_named_sibling if parent is not None else None
+    if parent is not None and parent.type == "ERROR" and sibling is not None:
+        descriptor = _adjacent_trailing_descriptor(command, parent, sibling)
+        if descriptor is not None:
+            for child in parent.named_children:
+                if "redirect" in child.type:
+                    _append_redirect_tree(redirects, command, child)
+            for child in sibling.named_children:
+                if "redirect" in child.type:
+                    _append_redirect_tree(redirects, command, child, descriptor)
+
+    redirects.sort(key=lambda item: item[0].start_byte)
+    return redirects
+
+
+def _adjacent_trailing_descriptor(
+    command: ShellCommand,
+    parent: Node,
+    sibling: Node,
+) -> str | None:
+    if sibling.start_byte != parent.end_byte:
+        return None
+    suffix = (parent.text or b"")[command.node.end_byte - parent.start_byte :]
+    fields = suffix.rsplit(maxsplit=1)
+    if not fields or not fields[-1].isdigit():
+        return None
+    return fields[-1].decode()
+
+
+def _append_redirect_tree(
+    redirects: list[tuple[Node, str]],
+    command: ShellCommand,
+    redirect: Node,
+    descriptor: str | None = None,
+) -> None:
+    redirects.append((redirect, descriptor or _redirect_descriptor(command, redirect)))
+    for child in redirect.named_children:
+        if "redirect" in child.type:
+            _append_redirect_tree(redirects, command, child)
+
+
+def _redirect_descriptor(command: ShellCommand, redirect: Node) -> str:
+    text = _decode(redirect.text).lstrip()
+    descriptor_length = len(text) - len(text.lstrip("0123456789"))
+    if descriptor_length:
+        return text[:descriptor_length]
+    for word in command.words:
+        if word.node.end_byte == redirect.start_byte and word.text.isdecimal():
+            return word.text
+    return "0" if text[descriptor_length:].startswith("<") else "1"
 
 
 def _extract_script_operand(
     arguments: tuple[str | None, ...],
     argument_words: tuple[ShellWord, ...],
+    basename: str,
 ) -> tuple[bool, str | None, bool]:
     """Locate the runner script operand using POSIX argv option semantics.
 
@@ -482,18 +1028,26 @@ def _extract_script_operand(
     script operand.
     """
     has_script_flag = False
+    noexec = False
+    dump_strings = False
     options_ended = False
     index = 0
     while index < len(arguments):
         literal = arguments[index]
         word = argument_words[index]
         if argument_arity_is_uncertain(literal, word):
+            if options_ended and (noexec or dump_strings):
+                return False, None, False
             if options_ended and not has_script_flag:
                 return False, None, False
             return has_script_flag, None, True
         if literal is None:
             if has_script_flag:
-                return True, None, False
+                return (
+                    (False, None, False)
+                    if noexec or dump_strings
+                    else (True, None, False)
+                )
             if options_ended:
                 return False, None, False
             if word.node_type in _DEFINITE_NON_OPTION_NODE_TYPES:
@@ -505,15 +1059,20 @@ def _extract_script_operand(
                 index += 1
                 continue
             if _is_option_word(literal):
+                if _is_definitely_invalid_option_word(literal):
+                    return False, None, False
+                value_count = _runner_option_value_count(literal, basename)
+                if value_count is None:
+                    return has_script_flag, None, True
                 if _sets_script_flag(literal):
                     has_script_flag = True
-                if not literal.startswith(_END_OF_OPTIONS) and any(
-                    flag in _SHORT_OPTS_WITH_ARG for flag in literal[1:-1]
-                ):
-                    return has_script_flag, None, True
-                if _consumes_next_word(literal):
+                noexec = _updated_noexec(noexec, literal)
+                dump_strings = dump_strings or _sets_dump_strings(basename, literal)
+                if value_count:
                     value_index = index + 1
-                    if value_index < len(arguments) and (
+                    if value_index >= len(arguments):
+                        return False, None, False
+                    if (
                         argument_words[value_index].node_type
                         in _DEFINITE_NON_OPTION_NODE_TYPES
                         or argument_arity_is_uncertain(
@@ -522,15 +1081,21 @@ def _extract_script_operand(
                         )
                     ):
                         return has_script_flag, None, True
-                    index += 2
-                else:
-                    index += 1
+                index += value_count + 1
                 continue
         # First operand reached.
         if has_script_flag:
-            return True, literal, False
+            return (
+                (False, None, False)
+                if noexec or dump_strings
+                else (True, literal, False)
+            )
         return False, None, False
-    return has_script_flag, None, False
+    return (
+        (False, None, False)
+        if noexec or dump_strings
+        else (has_script_flag, None, False)
+    )
 
 
 def _is_option_word(literal: str) -> bool:
@@ -552,17 +1117,44 @@ def _sets_script_flag(literal: str) -> bool:
     )
 
 
-def _consumes_next_word(literal: str) -> bool:
-    """Return whether an option word takes the next word as its argument.
+def _sets_stdin_flag(literal: str) -> bool:
+    return (
+        len(literal) > 1
+        and literal[0] == "-"
+        and literal[1] != "-"
+        and "s" in literal[1:]
+    )
 
-    A final short ``o`` or ``O`` consumes the next word. The caller treats an
-    earlier argument-taking flag as an unsupported option boundary.
-    """
+
+def _updated_noexec(current: bool, literal: str) -> bool:
+    if "n" not in literal[1:]:
+        return current
+    return literal.startswith("-")
+
+
+def _sets_dump_strings(basename: str | None, literal: str) -> bool:
+    return basename == "bash" and "D" in literal[1:]
+
+
+def _runner_option_value_count(literal: str, basename: str | None) -> int | None:
+    if literal.startswith(_END_OF_OPTIONS) and basename != "bash":
+        return None
     if literal in _LONG_OPTS_WITH_ARG:
-        return True
+        return 1
+    if literal in _LONG_OPTS_WITHOUT_ARG:
+        return 0
     if literal.startswith(_END_OF_OPTIONS):
-        return False
-    return literal[-1] in _SHORT_OPTS_WITH_ARG
+        return None
+    flags = literal[1:]
+    if any(flag not in _SHORT_RUNNER_OPTIONS for flag in flags):
+        return None
+    if any(flag in _SHORT_OPTS_WITH_ARG for flag in flags[:-1]):
+        return None
+    return int(flags[-1] in _SHORT_OPTS_WITH_ARG)
+
+
+def _is_definitely_invalid_option_word(literal: str) -> bool:
+    return literal.startswith(("++", "-+", "+-"))
 
 
 def _resolve_node_literal(node: Node) -> str | None:

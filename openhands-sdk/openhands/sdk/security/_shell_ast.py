@@ -185,6 +185,19 @@ def _view_command(program: ShellProgram, node: Node) -> ShellCommand:
 
         words.append(_shell_word(program, child))
 
+    redirects = _enclosing_redirects(node)
+    redirect_starts = {
+        nested.start_byte
+        for redirect in redirects
+        for nested in _redirect_nodes(redirect)
+    }
+    for redirect in redirects:
+        words.extend(
+            _shell_word(program, argument)
+            for argument in _redirect_argument_nodes(redirect, redirect_starts)
+        )
+    words.sort(key=lambda word: word.node.start_byte)
+
     return ShellCommand(
         name=name,
         words=tuple(words),
@@ -192,6 +205,51 @@ def _view_command(program: ShellProgram, node: Node) -> ShellCommand:
         node=node,
         has_error=_has_parse_uncertainty(node),
     )
+
+
+def _enclosing_redirects(node: Node) -> tuple[Node, ...]:
+    redirects: list[Node] = []
+    container = node
+    while (
+        container.parent is not None and container.parent.type == "redirected_statement"
+    ):
+        container = container.parent
+        redirects.extend(
+            child for child in container.named_children if "redirect" in child.type
+        )
+    return tuple(redirects)
+
+
+def _redirect_argument_nodes(
+    redirect: Node,
+    redirect_starts: set[int],
+) -> Iterator[Node]:
+    destination_seen = False
+    for index, child in enumerate(redirect.children):
+        if not child.is_named:
+            continue
+        field = redirect.field_name_for_child(index)
+        if field == "argument":
+            yield child
+        elif field == "destination":
+            if destination_seen and not (
+                _node_text(child).isdecimal() and child.end_byte in redirect_starts
+            ):
+                yield child
+            destination_seen = True
+        elif field == "redirect":
+            yield from _redirect_argument_nodes(child, redirect_starts)
+
+
+def _redirect_nodes(redirect: Node) -> Iterator[Node]:
+    yield redirect
+    for index, child in enumerate(redirect.children):
+        if child.is_named and redirect.field_name_for_child(index) == "redirect":
+            yield from _redirect_nodes(child)
+
+
+def _node_text(node: Node) -> str:
+    return (node.text or b"").decode()
 
 
 def _command_name_word(program: ShellProgram, node: Node) -> ShellWord:

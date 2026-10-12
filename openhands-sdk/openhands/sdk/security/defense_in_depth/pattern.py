@@ -29,6 +29,7 @@ from openhands.sdk.security.defense_in_depth.shell_semantics import (
 from openhands.sdk.security.defense_in_depth.utils import (
     _extract_content,
     _extract_exec_content,
+    _extract_exec_segments,
     _normalize,
 )
 from openhands.sdk.security.risk import SecurityRisk
@@ -235,10 +236,16 @@ class PatternSecurityAnalyzer(SecurityAnalyzerBase):
         # HIGH: AST resolution on executable fields, catching quoted,
         # path-qualified and nested command names that word-boundary
         # anchors cannot see.
-        shell_scan = scan_shell_command(exec_content, DET_EXEC_DESTRUCT_RM_RF)
-        if shell_scan.matched:
-            logger.debug("Shell AST matched: %s -> HIGH", shell_scan.detector_id)
-            return SecurityRisk.HIGH
+        shell_scans = (
+            scan_shell_command(segment, DET_EXEC_DESTRUCT_RM_RF)
+            for segment in _extract_exec_segments(action)
+        )
+        shell_scan_uncertain = False
+        for shell_scan in shell_scans:
+            if shell_scan.matched:
+                logger.debug("Shell AST matched: %s -> HIGH", shell_scan.detector_id)
+                return SecurityRisk.HIGH
+            shell_scan_uncertain = shell_scan_uncertain or shell_scan.uncertain
 
         # MEDIUM: patterns on executable fields only
         for pattern, _desc, det_id in self._compiled_medium:
@@ -255,7 +262,7 @@ class PatternSecurityAnalyzer(SecurityAnalyzerBase):
         # The destructive flag shape on a verb the scan could not resolve:
         # UNKNOWN rather than a false LOW, since UNKNOWN fails safe under
         # ConfirmRisky. Text that merely fails to parse stays LOW.
-        if shell_scan.uncertain:
+        if shell_scan_uncertain:
             logger.debug("Shell AST uncertain (unresolvable verb) -> UNKNOWN")
             return SecurityRisk.UNKNOWN
 

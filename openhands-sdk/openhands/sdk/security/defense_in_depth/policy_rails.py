@@ -31,7 +31,8 @@ from openhands.sdk.security.defense_in_depth.shell_semantics import (
     argument_arity_is_uncertain,
     has_recursive_force_flags,
     resolve_command,
-    static_shell_script,
+    standard_output_reaches_pipeline,
+    static_executable_shell_source,
     static_word_prefix,
 )
 from openhands.sdk.security.defense_in_depth.utils import _extract_exec_segments
@@ -71,6 +72,7 @@ class RailDecision:
 _PASS = RailDecision(outcome=SecurityRisk.LOW)
 
 _FETCH_COMMANDS = frozenset({"curl", "wget"})
+_FETCH_OUTPUT_FORWARDERS = frozenset({"echo"})
 _CRITICAL_ROOTS = ("/etc", "/usr", "/var", "/home", "/boot")
 _WRAPPER_OPTIONS = {
     "env": {
@@ -200,13 +202,18 @@ def _scan_program(
         if resolved.basename in _WRAPPER_OPTIONS and effective.uncertain:
             signals.uncertain = True
         commands.append((command, effective))
+    if _has_unmodeled_compound_source(program, commands):
+        signals.uncertain = True
     _scan_fetch_pipelines(program, commands, signals)
 
     for command, semantics in commands:
         _scan_raw_disk(semantics, signals)
         _scan_catastrophic_delete(semantics, signals)
 
-        has_script, script, script_uncertain = static_shell_script(semantics)
+        has_script, script, script_uncertain = static_executable_shell_source(
+            command,
+            semantics,
+        )
         if script_uncertain:
             signals.uncertain = True
         if not has_script:
@@ -226,6 +233,7 @@ def _scan_program(
 
 def _resolve_wrappers(command: CommandSemantics) -> CommandSemantics:
     while command.basename in _WRAPPER_OPTIONS:
+        wrapper = command.basename
         options = _WRAPPER_OPTIONS[command.basename]
         index = 0
         while index < len(command.arguments):
@@ -314,6 +322,20 @@ def _resolve_wrappers(command: CommandSemantics) -> CommandSemantics:
             basename=target.rsplit("/", 1)[-1],
             arguments=command.arguments[index + 1 :],
             argument_words=command.argument_words[index + 1 :],
+            can_invoke_shell_builtin=(
+                command.can_invoke_shell_builtin
+                and (
+                    wrapper == "command"
+                    or (wrapper == "time" and command.can_invoke_shell_keyword)
+                )
+                and "/" not in target
+            ),
+            can_invoke_shell_keyword=(
+                command.can_invoke_shell_keyword
+                and wrapper == "time"
+                and "/" not in target
+                and command.argument_words[index].text == target
+            ),
         )
     return command
 
@@ -362,6 +384,7 @@ def _scan_fetch_pipelines(
                 index += 1
             stage_commands.append(group)
         for index, source_commands in enumerate(stage_commands[:-1]):
+            stage = pipeline.node.named_children[index]
             has_rhs = any(
                 command.name is not None and bool(command.name.text)
                 for later_commands in stage_commands[index + 1 :]
@@ -373,12 +396,35 @@ def _scan_fetch_pipelines(
                 ):
                     signals.uncertain = True
                 continue
+            direct_command = next(
+                (
+                    (command, semantics)
+                    for command, semantics in source_commands
+                    if _pipeline_command_role(command.node, stage) == "direct"
+                    and command.name is not None
+                ),
+                None,
+            )
             for command, semantics in source_commands:
-                if _has_command_ancestor(
-                    command.node, pipeline.node.named_children[index]
-                ):
+                role = _pipeline_command_role(command.node, stage)
+                if role == "captured":
                     continue
-                has_script, _, script_uncertain = static_shell_script(semantics)
+                if role == "indirect":
+                    if _is_fetch(semantics):
+                        forwarding = _forwards_substitution(
+                            direct_command,
+                            command.node,
+                        )
+                        if forwarding:
+                            signals.fetch_to_exec = True
+                            return
+                        if forwarding is None:
+                            signals.uncertain = True
+                    continue
+                has_script, _, script_uncertain = static_executable_shell_source(
+                    command,
+                    semantics,
+                )
                 if has_script or script_uncertain:
                     signals.uncertain = True
                 if _is_fetch(semantics):
@@ -388,17 +434,123 @@ def _scan_fetch_pipelines(
                     signals.uncertain = True
 
 
-def _has_command_ancestor(node: Node, stage: Node) -> bool:
+def _pipeline_command_role(node: Node, stage: Node) -> str:
     if node == stage:
-        return False
+        return "direct"
+    in_substitution = False
+    in_assignment = False
     parent = node.parent
     while parent is not None:
+        if parent.type == "variable_assignment" and in_substitution:
+            in_assignment = True
+        if parent.type in {"command_substitution", "process_substitution"}:
+            in_substitution = True
         if parent.type == "command":
-            return True
+            if in_assignment and not any(
+                child.type == "command_name" for child in parent.named_children
+            ):
+                return "captured"
+            return "indirect"
         if parent == stage:
-            return False
+            if in_assignment:
+                return "captured"
+            return "indirect" if in_substitution else "direct"
         parent = parent.parent
+    return "indirect"
+
+
+def _forwards_substitution(
+    direct: tuple[ast_view.ShellCommand, CommandSemantics] | None,
+    nested_node: Node,
+) -> bool | None:
+    if direct is None:
+        return None
+    direct_syntax, direct_command = direct
+    if direct_command.basename not in _FETCH_OUTPUT_FORWARDERS | {"printf"}:
+        return None
+
+    argument_index = next(
+        (
+            index
+            for index, word in enumerate(direct_command.argument_words)
+            if word.node.start_byte <= nested_node.start_byte
+            and nested_node.end_byte <= word.node.end_byte
+        ),
+        None,
+    )
+    if argument_index is None:
+        return False
+    output_reaches_pipeline = standard_output_reaches_pipeline(direct_syntax)
+    if output_reaches_pipeline is not True:
+        return output_reaches_pipeline
+    if direct_command.basename in _FETCH_OUTPUT_FORWARDERS:
+        return True
+    if argument_index == 0 or not direct_command.arguments:
+        return False
+    format_string = direct_command.arguments[0]
+    if format_string is None or "\\" in format_string:
+        return None
+    return _printf_format_consumes_argument(format_string)
+
+
+def _printf_format_consumes_argument(format_string: str) -> bool:
+    index = 0
+    while index < len(format_string):
+        if format_string[index] != "%":
+            index += 1
+            continue
+        if index + 1 >= len(format_string):
+            return False
+        if format_string[index + 1] != "%":
+            return True
+        index += 2
     return False
+
+
+def _has_unmodeled_compound_source(
+    program: ast_view.ShellProgram,
+    commands: list[tuple[ast_view.ShellCommand, CommandSemantics]],
+) -> bool:
+    stack = [program.parse_result.tree.root_node]
+    while stack:
+        node = stack.pop()
+        if node.type == "redirected_statement":
+            body = node.child_by_field_name("body")
+            if (
+                body is not None
+                and body.type != "command"
+                and (
+                    b"<<<" in program.source_bytes[body.end_byte : node.end_byte]
+                    or any(
+                        _redirect_has_inline_source(child)
+                        for child in node.named_children
+                        if "redirect" in child.type
+                    )
+                )
+                and any(
+                    body.start_byte <= command.node.start_byte
+                    and command.node.end_byte <= body.end_byte
+                    and semantics.basename
+                    in {"sh", "bash", "dash", "zsh", "ksh", "ash"}
+                    for command, semantics in commands
+                )
+            ):
+                return True
+        stack.extend(node.named_children)
+    return False
+
+
+def _redirect_has_inline_source(redirect: Node) -> bool:
+    text = (redirect.text or b"").decode().lstrip("0123456789")
+    if redirect.type in {"heredoc_redirect", "herestring_redirect"} or text.startswith(
+        "<<<"
+    ):
+        return True
+    return any(
+        _redirect_has_inline_source(child)
+        for child in redirect.named_children
+        if "redirect" in child.type
+    )
 
 
 def _is_fetch(command: CommandSemantics) -> bool:
