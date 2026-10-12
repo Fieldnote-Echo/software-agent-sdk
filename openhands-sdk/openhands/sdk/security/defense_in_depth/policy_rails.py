@@ -30,6 +30,7 @@ from openhands.sdk.security.defense_in_depth.shell_semantics import (
     _safe_parse,
     argument_arity_is_uncertain,
     has_recursive_force_flags,
+    is_shell_runner,
     resolve_command,
     standard_output_reaches_pipeline,
     static_executable_shell_source,
@@ -319,7 +320,7 @@ def _resolve_wrappers(command: CommandSemantics) -> CommandSemantics:
             return replace(command, uncertain=True)
         command = replace(
             command,
-            basename=target.rsplit("/", 1)[-1],
+            basename=posixpath.basename(target),
             arguments=command.arguments[index + 1 :],
             argument_words=command.argument_words[index + 1 :],
             can_invoke_shell_builtin=(
@@ -530,8 +531,7 @@ def _has_unmodeled_compound_source(
                 and any(
                     body.start_byte <= command.node.start_byte
                     and command.node.end_byte <= body.end_byte
-                    and semantics.basename
-                    in {"sh", "bash", "dash", "zsh", "ksh", "ash"}
+                    and is_shell_runner(semantics)
                     for command, semantics in commands
                 )
             ):

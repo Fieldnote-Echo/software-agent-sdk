@@ -27,6 +27,7 @@ unchanged.
 from __future__ import annotations
 
 import contextlib
+import posixpath
 from dataclasses import dataclass, replace
 from fnmatch import fnmatchcase
 from typing import Final
@@ -92,10 +93,10 @@ _SHORT_RUNNER_OPTIONS: Final[frozenset[str]] = frozenset("abefhkmnptuvxBCDHPcilr
 _LONG_RECURSIVE: Final[str] = "recursive"
 _LONG_FORCE: Final[str] = "force"
 
-# Node types that make a command name dynamic (value known only at runtime).
-# Any such child makes the name unresolvable at analysis time, so resolution
-# fails and the caller falls back.
-_DYNAMIC_NAME_NODE_TYPES: Final[frozenset[str]] = frozenset(
+# Node types that this analyzer cannot resolve to literal text. Most are
+# dynamic. ANSI-C strings are static, but decoding their escape language is
+# outside this analyzer's bounded literal resolver.
+_UNRESOLVED_LITERAL_NODE_TYPES: Final[frozenset[str]] = frozenset(
     {
         "command_substitution",
         "process_substitution",
@@ -115,9 +116,9 @@ _MAX_NESTING_DEPTH: Final[int] = 8
 # any other character the backslash is literal and must be retained.
 _DOUBLE_QUOTE_ESCAPABLE: Final[frozenset[str]] = frozenset('$`"\\')
 
-# Quoted dynamic content stays in one argv position, except for the Bash
-# ``@`` expansions handled below. Other unresolved word shapes can split.
-_SINGLE_ARGUMENT_DYNAMIC_NODE_TYPES: Final[frozenset[str]] = frozenset(
+# These unresolved node types stay in one argv position. Quoted Bash ``@``
+# expansions are handled separately below. Other unresolved shapes can split.
+_SINGLE_ARGUMENT_UNRESOLVED_NODE_TYPES: Final[frozenset[str]] = frozenset(
     {
         "string",
         "raw_string",
@@ -146,7 +147,7 @@ _RM_OPTION_PATTERNS: Final[tuple[tuple[str, frozenset[str]], ...]] = (
 
 @dataclass(frozen=True, slots=True)
 class CommandSemantics:
-    """Static argv facts for the effective command."""
+    """Static argv facts for one resolved command."""
 
     basename: str | None
     arguments: tuple[str | None, ...]
@@ -249,7 +250,7 @@ def resolve_command(command: ShellCommand) -> CommandSemantics:
     )
     return CommandSemantics(
         basename=(
-            _posix_basename(name_literal)
+            posixpath.basename(name_literal)
             if name_literal is not None and not name_arity_uncertain
             else None
         ),
@@ -276,13 +277,19 @@ def has_recursive_force_flags(command: CommandSemantics) -> bool:
 
 def static_shell_script(command: CommandSemantics) -> tuple[bool, str | None, bool]:
     """Return the script and option-boundary uncertainty for a shell runner."""
-    if command.basename not in _SHELL_RUNNERS:
+    if not is_shell_runner(command):
         return False, None, False
+    assert command.basename is not None
     return _extract_script_operand(
         command.arguments,
         command.argument_words,
         command.basename,
     )
+
+
+def is_shell_runner(command: CommandSemantics) -> bool:
+    """Return whether a command resolves to a supported shell runner."""
+    return command.basename in _SHELL_RUNNERS
 
 
 def static_executable_shell_source(
@@ -320,7 +327,7 @@ def static_executable_shell_source(
         literal_arguments = [argument for argument in arguments if argument is not None]
         return True, " ".join(literal_arguments), False
 
-    if runner_command.basename not in _SHELL_RUNNERS:
+    if not is_shell_runner(runner_command):
         return False, None, False
     has_source, source, source_uncertain = _static_standard_input_source(syntax)
     if not has_source:
@@ -419,7 +426,7 @@ def static_word_prefix(word: ShellWord) -> str:
 
 
 def _static_node_prefix(node: Node) -> tuple[str, bool]:
-    if node.type in _DYNAMIC_NAME_NODE_TYPES:
+    if node.type in _UNRESOLVED_LITERAL_NODE_TYPES:
         return "", False
     if node.type in {"string", "command_name", "concatenation"}:
         parts: list[str] = []
@@ -436,7 +443,7 @@ def _static_node_prefix(node: Node) -> tuple[str, bool]:
 def _node_arity_is_uncertain(node: Node) -> bool:
     if node.type == "string":
         return _contains_multi_argument_expansion(node)
-    if node.type in _SINGLE_ARGUMENT_DYNAMIC_NODE_TYPES or node.type in {
+    if node.type in _SINGLE_ARGUMENT_UNRESOLVED_NODE_TYPES or node.type in {
         "word",
         "number",
     }:
@@ -534,8 +541,8 @@ def _program_signal(program: ShellProgram, depth: int) -> SignalOutput:
     """Return the scan signal for a parsed program.
 
     ``matched`` is True when a recursive force delete is resolved. ``uncertain``
-    is True when the destructive flag shape is present on a command whose verb
-    cannot be resolved statically.
+    is True when a relevant command, flag shape, parse span, or nested execution
+    boundary cannot be resolved statically.
     """
     uncertain = False
     for command in ast_view.iter_commands(program):
@@ -732,7 +739,7 @@ def _nested_signal(
     scan just read cannot be trusted, so a silent LOW would vouch for
     something never actually seen.
     """
-    source_command = resolved.basename in _SHELL_RUNNERS or resolved.basename in {
+    source_command = is_shell_runner(resolved) or resolved.basename in {
         "eval",
         "builtin",
         "command",
@@ -990,10 +997,13 @@ def _append_redirect_tree(
     redirect: Node,
     descriptor: str | None = None,
 ) -> None:
-    redirects.append((redirect, descriptor or _redirect_descriptor(command, redirect)))
-    for child in redirect.named_children:
-        if "redirect" in child.type:
-            _append_redirect_tree(redirects, command, child)
+    for index, nested in enumerate(ast_view.iter_redirect_nodes(redirect)):
+        nested_descriptor = (
+            descriptor
+            if index == 0 and descriptor is not None
+            else _redirect_descriptor(command, nested)
+        )
+        redirects.append((nested, nested_descriptor))
 
 
 def _redirect_descriptor(command: ShellCommand, redirect: Node) -> str:
@@ -1015,13 +1025,12 @@ def _extract_script_operand(
     """Locate the runner script operand using POSIX argv option semantics.
 
     Short options combine, so the script flag counts at any position in a
-    group (``-xc``, ``-cx``); an argument-taking option consumes the next
-    word; ``--`` (or the historical lone ``-``) terminates option parsing;
-    and the first operand ends the option list. With the script flag set,
-    that first operand IS the script. Without it, the first operand is a
-    script *file*, and any flag word after it -- or after ``--`` -- belongs
-    to that script rather than to the runner, so it must not trigger a
-    descent.
+    group (``-xc``, ``-cx``). A supported argument-taking option consumes the
+    next word when it is last in its group. Other placements remain uncertain.
+    ``--`` (or the historical lone ``-``) terminates option parsing. The first
+    operand then ends the option list. With the script flag set, that operand
+    is the script. Without it, that operand is a script file. Later flags
+    belong to the script and must not trigger a nested scan.
 
     Returns ``(has_flag, operand, uncertain)``. ``uncertain`` is True when a
     dynamic word or unsupported option group prevents safe selection of the
@@ -1158,12 +1167,11 @@ def _is_definitely_invalid_option_word(literal: str) -> bool:
 
 
 def _resolve_node_literal(node: Node) -> str | None:
-    """Concatenate literal text from a name/word node, or None if dynamic.
+    """Concatenate literal text, or return None when it cannot be resolved.
 
     Walks the concatenation/string/raw_string/word structure that
-    tree-sitter-bash produces for command names and arguments. Any dynamic
-    child (substitution, expansion, ANSI-C string) makes the value
-    unresolvable at analysis time and yields None.
+    tree-sitter-bash produces for command names and arguments. A dynamic or
+    unsupported child, including an ANSI-C string, yields None.
     """
     parts = _collect_literal_parts(node)
     if parts is None:
@@ -1172,7 +1180,7 @@ def _resolve_node_literal(node: Node) -> str | None:
 
 
 def _collect_literal_parts(node: Node) -> list[str] | None:
-    """Return the literal fragments of ``node``, or None if it is dynamic.
+    """Return literal fragments, or None when a node cannot be resolved.
 
     None means the subtree is not statically resolvable. Fragments are
     escape-normalized to the effective literal the shell would produce after
@@ -1180,7 +1188,7 @@ def _collect_literal_parts(node: Node) -> list[str] | None:
     ``string_content`` text, so comparing raw text would let ``r\\m`` (which
     the shell runs as ``rm``) slip past the basename check.
     """
-    if node.type in _DYNAMIC_NAME_NODE_TYPES:
+    if node.type in _UNRESOLVED_LITERAL_NODE_TYPES:
         return None
 
     match node.type:
@@ -1259,15 +1267,6 @@ def _strip_backslash_escapes(text: str, escapable: frozenset[str] | None) -> str
         parts.append(char)
         index += 1
     return "".join(parts)
-
-
-def _posix_basename(path: str) -> str:
-    """Return the final path segment (basename) without importing posixpath.
-
-    A trailing slash yields an empty basename, matching POSIX ``basename``
-    semantics closely enough for command-name resolution.
-    """
-    return path.rsplit("/", 1)[-1]
 
 
 def _decode(raw: bytes | None) -> str:

@@ -189,12 +189,16 @@ def _view_command(program: ShellProgram, node: Node) -> ShellCommand:
     redirect_starts = {
         nested.start_byte
         for redirect in redirects
-        for nested in _redirect_nodes(redirect)
+        for nested in iter_redirect_nodes(redirect)
     }
     for redirect in redirects:
         words.extend(
             _shell_word(program, argument)
-            for argument in _redirect_argument_nodes(redirect, redirect_starts)
+            for argument in _redirect_argument_nodes(
+                program,
+                redirect,
+                redirect_starts,
+            )
         )
     words.sort(key=lambda word: word.node.start_byte)
 
@@ -221,6 +225,7 @@ def _enclosing_redirects(node: Node) -> tuple[Node, ...]:
 
 
 def _redirect_argument_nodes(
+    program: ShellProgram,
     redirect: Node,
     redirect_starts: set[int],
 ) -> Iterator[Node]:
@@ -233,23 +238,21 @@ def _redirect_argument_nodes(
             yield child
         elif field == "destination":
             if destination_seen and not (
-                _node_text(child).isdecimal() and child.end_byte in redirect_starts
+                node_text(program, child).isdecimal()
+                and child.end_byte in redirect_starts
             ):
                 yield child
             destination_seen = True
         elif field == "redirect":
-            yield from _redirect_argument_nodes(child, redirect_starts)
+            yield from _redirect_argument_nodes(program, child, redirect_starts)
 
 
-def _redirect_nodes(redirect: Node) -> Iterator[Node]:
+def iter_redirect_nodes(redirect: Node) -> Iterator[Node]:
+    """Yield one redirect and its nested redirect nodes."""
     yield redirect
     for index, child in enumerate(redirect.children):
         if child.is_named and redirect.field_name_for_child(index) == "redirect":
-            yield from _redirect_nodes(child)
-
-
-def _node_text(node: Node) -> str:
-    return (node.text or b"").decode()
+            yield from iter_redirect_nodes(child)
 
 
 def _command_name_word(program: ShellProgram, node: Node) -> ShellWord:
