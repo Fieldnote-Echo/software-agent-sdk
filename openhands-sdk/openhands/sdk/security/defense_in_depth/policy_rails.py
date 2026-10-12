@@ -258,12 +258,11 @@ def _resolve_wrappers(command: CommandSemantics) -> CommandSemantics:
             if value_count is None or index + value_count >= len(command.arguments):
                 return replace(command, uncertain=True)
             if any(
-                argument_arity_is_uncertain(value, word)
-                for value, word in zip(
-                    command.arguments[index + 1 : index + value_count + 1],
-                    command.argument_words[index + 1 : index + value_count + 1],
-                    strict=True,
+                argument_arity_is_uncertain(
+                    command.arguments[value_index],
+                    command.argument_words[value_index],
                 )
+                for value_index in range(index + 1, index + value_count + 1)
             ):
                 return replace(command, uncertain=True)
             index += value_count + 1
@@ -284,13 +283,10 @@ def _resolve_wrappers(command: CommandSemantics) -> CommandSemantics:
                     word,
                 ):
                     return replace(command, uncertain=True)
-                if argument is None:
-                    prefix = static_word_prefix(word)
-                    if not prefix.partition("=")[1]:
+                prefix = argument if argument is not None else static_word_prefix(word)
+                if "=" not in prefix:
+                    if argument is None:
                         return replace(command, uncertain=True)
-                    index += 1
-                    continue
-                if "=" not in argument:
                     break
                 index += 1
         prefix_count = _PREFIX_OPERAND_WRAPPERS.get(command.basename, 0)
@@ -313,11 +309,11 @@ def _resolve_wrappers(command: CommandSemantics) -> CommandSemantics:
             command.argument_words[index],
         ):
             return replace(command, uncertain=True)
-        command = CommandSemantics(
+        command = replace(
+            command,
             basename=target.rsplit("/", 1)[-1],
             arguments=command.arguments[index + 1 :],
             argument_words=command.argument_words[index + 1 :],
-            uncertain=command.uncertain,
         )
     return command
 
