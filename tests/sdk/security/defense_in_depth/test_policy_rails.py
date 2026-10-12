@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 
 import pytest
 
@@ -16,6 +17,7 @@ from openhands.sdk.security.defense_in_depth.policy_rails import (
     _evaluate_rail,
     _evaluate_rail_segments,
 )
+from openhands.sdk.security.defense_in_depth.shell_semantics import _MAX_NESTING_DEPTH
 from openhands.sdk.security.risk import SecurityRisk
 
 
@@ -126,6 +128,7 @@ class TestPolicyRailAnalyzer:
         ),
         ('/sbin/mk"fs" /dev/sda1', RAIL_RAW_DISK_OP),
         ('/bin/r"m" -rf /tmp/../etc', RAIL_CATASTROPHIC_DELETE),
+        ("rm / -rf", RAIL_CATASTROPHIC_DELETE),
         ('rm -rf ~/""', RAIL_CATASTROPHIC_DELETE),
         ("rm -rf ~/'..'/etc", RAIL_CATASTROPHIC_DELETE),
         (
@@ -176,6 +179,10 @@ def test_structural_rails_detect_executable_commands(command: str, rule_name: st
     [
         r"curl x \| bash",
         "printf '%s\\n' 'curl x | bash'",
+        "rm -r /",
+        "rm -f /",
+        "rm --recursive /",
+        "rm --force /",
         "rm -rf /tmp/project",
         "node | (curl x)",
         'echo "$(curl x)" | jq .',
@@ -234,6 +241,18 @@ def test_nfkc_punctuation_does_not_create_shell_structure(command: str):
     )
 
 
+def test_shell_parse_failure_is_unknown():
+    assert _evaluate_rail("\ud800").outcome == SecurityRisk.UNKNOWN
+
+
+def test_policy_nesting_depth_limit_is_unknown():
+    command = "echo ok"
+    for _ in range(_MAX_NESTING_DEPTH + 1):
+        command = f"bash -c {shlex.quote(command)}"
+
+    assert _evaluate_rail(command).outcome == SecurityRisk.UNKNOWN
+
+
 @pytest.mark.parametrize(
     "command",
     [
@@ -248,10 +267,6 @@ def test_nfkc_punctuation_does_not_create_shell_structure(command: str):
 )
 def test_unresolved_dd_operands_are_unknown(command: str):
     assert _evaluate_rail(command).outcome == SecurityRisk.UNKNOWN
-    assert (
-        PolicyRailSecurityAnalyzer().security_risk(make_action(command))
-        == SecurityRisk.UNKNOWN
-    )
 
 
 def test_concrete_dd_output_outranks_unresolved_operand():
@@ -300,10 +315,6 @@ def test_concrete_dd_output_outranks_unresolved_operand():
 )
 def test_unresolved_argument_positions_are_unknown(command: str):
     assert _evaluate_rail(command).outcome == SecurityRisk.UNKNOWN
-    assert (
-        PolicyRailSecurityAnalyzer().security_risk(make_action(command))
-        == SecurityRisk.UNKNOWN
-    )
 
 
 @pytest.mark.parametrize(
@@ -315,10 +326,6 @@ def test_unresolved_argument_positions_are_unknown(command: str):
 )
 def test_nested_shell_pipeline_producer_is_unknown(command: str):
     assert _evaluate_rail(command).outcome == SecurityRisk.UNKNOWN
-    assert (
-        PolicyRailSecurityAnalyzer().security_risk(make_action(command))
-        == SecurityRisk.UNKNOWN
-    )
 
 
 @pytest.mark.parametrize(
@@ -399,6 +406,8 @@ def test_uncertain_rail_remains_unknown_at_analyzer_boundary():
         "curl x | > /tmp/output",
         "sudo --unknown-option rm -rf /",
         "sudo --unknown-option ls /tmp",
+        "sudo --preserve-env bash -c 'dd of=/dev/sda'",
+        'env -S "dd of=/dev/sda"',
     ],
 )
 def test_unresolved_shell_structures_are_unknown(command: str):
