@@ -131,6 +131,31 @@ def test_command_selection_at_analyzer_boundary(
 
 
 @pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("command -v python", SecurityRisk.LOW),
+        ("command -V python", SecurityRisk.LOW),
+        ("command -pv python", SecurityRisk.LOW),
+        ("command -v mkfs.ext4", SecurityRisk.LOW),
+        ('command -v "$TARGET"', SecurityRisk.LOW),
+        ("command -p dd of=/dev/sda", SecurityRisk.HIGH),
+        ("command -v python; dd of=/dev/sda", SecurityRisk.HIGH),
+        ('command -v "$(dd of=/dev/sda)"', SecurityRisk.HIGH),
+        ('command "$OPT" dd of=/dev/sda', SecurityRisk.UNKNOWN),
+        ("/tmp/command -p dd of=/dev/sda", SecurityRisk.LOW),
+        ("builtin command -p dd of=/dev/sda", SecurityRisk.HIGH),
+        ("builtin command -v mkfs.ext4", SecurityRisk.LOW),
+        ("builtin exec dd of=/dev/sda", SecurityRisk.HIGH),
+        ("builtin rm -rf /", SecurityRisk.LOW),
+        ("/tmp/builtin command -p dd of=/dev/sda", SecurityRisk.LOW),
+    ],
+)
+def test_command_builtin_modes(command: str, expected: SecurityRisk):
+    assert _evaluate_rail(command).outcome == expected
+    assert PolicyRailSecurityAnalyzer().security_risk(make_action(command)) == expected
+
+
+@pytest.mark.parametrize(
     ("command", "rule_name"),
     [
         ('/usr/bin/cu"rl" x | /usr/bin/no"de"', RAIL_FETCH_TO_EXEC),

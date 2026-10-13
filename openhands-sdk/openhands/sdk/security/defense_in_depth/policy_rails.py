@@ -60,9 +60,11 @@ RAIL_CATASTROPHIC_DELETE = "catastrophic-delete"
 class RailDecision:
     """Result of a policy rail evaluation.
 
-    ``outcome`` is ``HIGH`` when a rail fires, ``UNKNOWN`` when a relevant
-    shell structure cannot be resolved, and ``LOW`` when all rails pass.
-    ``reason`` preserves observability for logging and debugging.
+    ``outcome`` is ``HIGH`` when a rail fires and ``UNKNOWN`` when a relevant
+    shell structure cannot be resolved. ``LOW`` means that no configured rail
+    matched and no relevant uncertainty remained. It is not a general safety
+    or authorization result. ``reason`` preserves observability for logging
+    and debugging.
     """
 
     outcome: SecurityRisk
@@ -97,7 +99,8 @@ _WRAPPER_OPTIONS = {
         "-D": 1,
         "--chdir": 1,
     },
-    "command": {"-p": 0},
+    "builtin": {},
+    "command": {"-p": 0, "-v": 0, "-V": 0},
     "time": {"-p": 0},
     "timeout": {
         "--foreground": 0,
@@ -120,6 +123,7 @@ _WRAPPER_OPTIONS = {
 }
 _ASSIGNMENT_WRAPPERS = frozenset({"env", "sudo"})
 _PREFIX_OPERAND_WRAPPERS = {"timeout": 1, "chroot": 1}
+_BUILTIN_WRAPPER_TARGETS = frozenset({"builtin", "command", "exec"})
 
 
 @dataclass
@@ -234,6 +238,11 @@ def _scan_program(
 
 def _resolve_wrappers(command: CommandSemantics) -> CommandSemantics:
     while command.basename in _WRAPPER_OPTIONS:
+        if (
+            command.basename in {"builtin", "command"}
+            and not command.can_invoke_shell_builtin
+        ):
+            break
         wrapper = command.basename
         options = _WRAPPER_OPTIONS[command.basename]
         index = 0
@@ -266,6 +275,10 @@ def _resolve_wrappers(command: CommandSemantics) -> CommandSemantics:
             value_count = _wrapper_option_value_count(argument, options)
             if value_count is None or index + value_count >= len(command.arguments):
                 return replace(command, uncertain=True)
+            if wrapper == "command" and any(
+                flag in argument[1:] for flag in ("v", "V")
+            ):
+                return command
             if any(
                 argument_arity_is_uncertain(
                     command.arguments[value_index],
@@ -318,6 +331,8 @@ def _resolve_wrappers(command: CommandSemantics) -> CommandSemantics:
             command.argument_words[index],
         ):
             return replace(command, uncertain=True)
+        if wrapper == "builtin" and target not in _BUILTIN_WRAPPER_TARGETS:
+            return command
         command = replace(
             command,
             basename=posixpath.basename(target),
@@ -326,7 +341,7 @@ def _resolve_wrappers(command: CommandSemantics) -> CommandSemantics:
             can_invoke_shell_builtin=(
                 command.can_invoke_shell_builtin
                 and (
-                    wrapper == "command"
+                    wrapper in {"builtin", "command"}
                     or (wrapper == "time" and command.can_invoke_shell_keyword)
                 )
                 and "/" not in target
@@ -674,9 +689,11 @@ class PolicyRailSecurityAnalyzer(SecurityAnalyzerBase):
     Evaluates original executable segments only -- reasoning text is never
     scanned.
 
-    Returns ``SecurityRisk.HIGH`` when a rail fires, ``UNKNOWN`` when a
-    relevant shell structure cannot be resolved, and ``LOW`` otherwise.
-    Pair with ``ConfirmRisky`` and compose via ``EnsembleSecurityAnalyzer``.
+    Returns ``SecurityRisk.HIGH`` when a rail fires and ``UNKNOWN`` when a
+    relevant shell structure cannot be resolved. ``LOW`` means that no
+    configured rail matched and no relevant uncertainty remained. It does not
+    establish general safety or authorization. Pair with ``ConfirmRisky`` and
+    compose via ``EnsembleSecurityAnalyzer``.
 
     v1 rails: fetch-to-exec, raw-disk-op, catastrophic-delete.
 
