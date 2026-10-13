@@ -35,6 +35,9 @@ from openhands.sdk.security.defense_in_depth.shell_semantics import (
     resolve_command,
     standard_output_reaches_pipeline,
     static_executable_shell_source,
+    static_piped_shell_source,
+    static_pipeline_output,
+    static_standard_input_source,
     static_word_prefix,
 )
 from openhands.sdk.security.defense_in_depth.utils import _extract_exec_segments
@@ -200,6 +203,7 @@ def _scan_program(
     program: ast_view.ShellProgram,
     depth: int,
     signals: _RailSignals,
+    inherited_input: tuple[bool, str | None, bool] | None = None,
 ) -> None:
     commands = []
     for command in ast_view.iter_commands(program):
@@ -210,7 +214,15 @@ def _scan_program(
         commands.append((command, effective))
     if _has_unmodeled_compound_source(program, commands):
         signals.uncertain = True
-    _scan_fetch_pipelines(program, commands, signals)
+    _scan_fetch_pipelines(program, commands, depth, signals)
+    if inherited_input is not None:
+        _scan_inherited_shell_input(
+            program,
+            commands,
+            inherited_input,
+            depth,
+            signals,
+        )
 
     for command, semantics in commands:
         _scan_raw_disk(semantics, signals)
@@ -224,17 +236,71 @@ def _scan_program(
             signals.uncertain = True
         if not has_script:
             continue
-        if script is None:
+        nested_input = None
+        if inherited_input is not None and len(commands) == 1:
+            candidate = static_standard_input_source(
+                command,
+                inherited_input,
+                program.parse_result.tree.root_node,
+            )
+            if candidate[0]:
+                nested_input = candidate
+        _scan_nested_source(
+            script,
+            depth,
+            signals,
+            inherited_input=nested_input,
+        )
+
+
+def _scan_inherited_shell_input(
+    program: ast_view.ShellProgram,
+    commands: list[tuple[ast_view.ShellCommand, CommandSemantics]],
+    source: tuple[bool, str | None, bool],
+    depth: int,
+    signals: _RailSignals,
+) -> None:
+    root = program.parse_result.tree.root_node
+    executable_sources = []
+    for command, semantics in commands:
+        has_source, script, uncertain = static_piped_shell_source(
+            command,
+            semantics,
+            source,
+            root,
+        )
+        if uncertain:
             signals.uncertain = True
-            continue
-        if depth >= _MAX_NESTING_DEPTH:
-            signals.uncertain = True
-            continue
-        nested = _safe_parse(script)
-        if nested is None:
-            signals.uncertain = True
-            continue
-        _scan_program(nested, depth=depth + 1, signals=signals)
+        if has_source:
+            executable_sources.append(script)
+
+    if not executable_sources:
+        return
+    if len(commands) != 1 or len(executable_sources) != 1:
+        signals.uncertain = True
+        return
+    _scan_nested_source(executable_sources[0], depth, signals)
+
+
+def _scan_nested_source(
+    source: str | None,
+    depth: int,
+    signals: _RailSignals,
+    inherited_input: tuple[bool, str | None, bool] | None = None,
+) -> None:
+    if source is None or depth >= _MAX_NESTING_DEPTH:
+        signals.uncertain = True
+        return
+    nested = _safe_parse(source)
+    if nested is None:
+        signals.uncertain = True
+        return
+    _scan_program(
+        nested,
+        depth=depth + 1,
+        signals=signals,
+        inherited_input=inherited_input,
+    )
 
 
 def _resolve_wrappers(command: CommandSemantics) -> CommandSemantics:
@@ -384,24 +450,19 @@ def _wrapper_option_value_count(
 def _scan_fetch_pipelines(
     program: ast_view.ShellProgram,
     commands: list[tuple[ast_view.ShellCommand, CommandSemantics]],
+    depth: int,
     signals: _RailSignals,
 ) -> None:
     command_starts = [command.node.start_byte for command, _ in commands]
     for pipeline in ast_view.iter_pipelines(program):
-        stage_commands = []
-        for stage in pipeline.node.named_children:
-            index = bisect_left(command_starts, stage.start_byte)
-            group = []
-            while index < len(commands):
-                pair = commands[index]
-                if pair[0].node.start_byte >= stage.end_byte:
-                    break
-                if pair[0].node.end_byte <= stage.end_byte:
-                    group.append(pair)
-                index += 1
-            stage_commands.append(group)
+        stages, stage_commands = _pipeline_stages(
+            pipeline,
+            commands,
+            command_starts,
+        )
+        _scan_piped_shell_sources(stages, stage_commands, depth, signals)
         for index, source_commands in enumerate(stage_commands[:-1]):
-            stage = pipeline.node.named_children[index]
+            stage = stages[index]
             has_rhs = any(
                 command.name is not None and bool(command.name.text)
                 for later_commands in stage_commands[index + 1 :]
@@ -413,15 +474,7 @@ def _scan_fetch_pipelines(
                 ):
                     signals.uncertain = True
                 continue
-            direct_command = next(
-                (
-                    (command, semantics)
-                    for command, semantics in source_commands
-                    if _pipeline_command_role(command.node, stage) == "direct"
-                    and command.name is not None
-                ),
-                None,
-            )
+            direct_command = _direct_stage_command(stage, source_commands)
             for command, semantics in source_commands:
                 role = _pipeline_command_role(command.node, stage)
                 if role == "captured":
@@ -449,6 +502,162 @@ def _scan_fetch_pipelines(
                     return
                 if semantics.uncertain:
                     signals.uncertain = True
+
+
+def _pipeline_stages(
+    pipeline: ast_view.ShellPipeline,
+    commands: list[tuple[ast_view.ShellCommand, CommandSemantics]],
+    command_starts: list[int],
+) -> tuple[
+    list[Node],
+    list[list[tuple[ast_view.ShellCommand, CommandSemantics]]],
+]:
+    stages = list(pipeline.node.named_children)
+    stage_commands = []
+    for stage in stages:
+        index = bisect_left(command_starts, stage.start_byte)
+        group = []
+        while index < len(commands):
+            pair = commands[index]
+            if pair[0].node.start_byte >= stage.end_byte:
+                break
+            if pair[0].node.end_byte <= stage.end_byte:
+                group.append(pair)
+            index += 1
+        stage_commands.append(group)
+
+    leading_source = _leading_heredoc_pipeline_source(pipeline.node, commands)
+    if leading_source is not None:
+        stages.insert(0, leading_source[0].node)
+        stage_commands.insert(0, [leading_source])
+    return stages, stage_commands
+
+
+def _leading_heredoc_pipeline_source(
+    pipeline: Node,
+    commands: list[tuple[ast_view.ShellCommand, CommandSemantics]],
+) -> tuple[ast_view.ShellCommand, CommandSemantics] | None:
+    """Recover a heredoc source kept outside a leading-pipe AST node."""
+    if not (pipeline.text or b"").lstrip().startswith(b"|"):
+        return None
+    redirect = pipeline.parent
+    statement = redirect.parent if redirect is not None else None
+    if (
+        redirect is None
+        or redirect.type != "heredoc_redirect"
+        or statement is None
+        or statement.type != "redirected_statement"
+    ):
+        return None
+    body = statement.child_by_field_name("body")
+    if body is None or body.type != "command":
+        return None
+    return next((pair for pair in commands if pair[0].node == body), None)
+
+
+def _direct_stage_command(
+    stage: Node,
+    commands: list[tuple[ast_view.ShellCommand, CommandSemantics]],
+) -> tuple[ast_view.ShellCommand, CommandSemantics] | None:
+    direct_commands = _direct_stage_commands(stage, commands)
+    return direct_commands[0] if direct_commands else None
+
+
+def _direct_stage_commands(
+    stage: Node,
+    commands: list[tuple[ast_view.ShellCommand, CommandSemantics]],
+) -> list[tuple[ast_view.ShellCommand, CommandSemantics]]:
+    return [
+        (command, semantics)
+        for command, semantics in commands
+        if _pipeline_command_role(command.node, stage) == "direct"
+        and command.name is not None
+    ]
+
+
+def _scan_piped_shell_sources(
+    stages: list[Node],
+    stage_commands: list[list[tuple[ast_view.ShellCommand, CommandSemantics]]],
+    depth: int,
+    signals: _RailSignals,
+) -> None:
+    for index in range(len(stage_commands) - 1):
+        producers = _direct_stage_commands(stages[index], stage_commands[index])
+        consumers = _direct_stage_commands(
+            stages[index + 1],
+            stage_commands[index + 1],
+        )
+        if not consumers:
+            continue
+        if len(producers) != 1:
+            if any(_could_be_shell_runner(semantics) for _, semantics in consumers):
+                signals.uncertain = True
+            continue
+        producer = producers[0]
+        output = static_pipeline_output(
+            producer[0],
+            producer[1],
+            stages[index],
+        )
+        if not output[0]:
+            continue
+        if len(consumers) != 1:
+            if any(_could_be_shell_runner(semantics) for _, semantics in consumers):
+                signals.uncertain = True
+            continue
+        consumer = consumers[0]
+        if not is_shell_runner(consumer[1]) and _could_be_shell_runner(consumer[1]):
+            signals.uncertain = True
+            continue
+        has_source, source, source_uncertain = static_piped_shell_source(
+            consumer[0],
+            consumer[1],
+            output,
+            stages[index + 1],
+        )
+        if source_uncertain:
+            signals.uncertain = True
+        if not has_source:
+            _scan_piped_shell_script(
+                consumer,
+                output,
+                stages[index + 1],
+                depth,
+                signals,
+            )
+            continue
+        _scan_nested_source(source, depth, signals)
+
+
+def _scan_piped_shell_script(
+    consumer: tuple[ast_view.ShellCommand, CommandSemantics],
+    pipeline_source: tuple[bool, str | None, bool],
+    stage: Node,
+    depth: int,
+    signals: _RailSignals,
+) -> None:
+    has_script, script, script_uncertain = static_executable_shell_source(*consumer)
+    if script_uncertain:
+        signals.uncertain = True
+    if not has_script:
+        return
+    standard_input = static_standard_input_source(
+        consumer[0],
+        pipeline_source,
+        stage,
+    )
+    if not standard_input[0]:
+        return
+    _scan_nested_source(
+        script,
+        depth,
+        signals,
+        inherited_input=standard_input,
+    )
+
+
+def _could_be_shell_runner(command: CommandSemantics) -> bool:
+    return is_shell_runner(command) or command.uncertain or command.basename is None
 
 
 def _pipeline_command_role(node: Node, stage: Node) -> str:

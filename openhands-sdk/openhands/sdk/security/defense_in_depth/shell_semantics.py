@@ -340,15 +340,185 @@ def static_executable_shell_source(
     return True, source, source_uncertain
 
 
-def standard_output_reaches_pipeline(command: ShellCommand) -> bool | None:
+def static_pipeline_output(
+    syntax: ShellCommand,
+    command: CommandSemantics,
+    enclosing_node: Node,
+) -> tuple[bool, str | None, bool]:
+    """Return output that a command writes as the next pipeline stage's input."""
+    reaches_pipeline = standard_output_reaches_pipeline(syntax, enclosing_node)
+    if reaches_pipeline is False:
+        return False, None, False
+    if reaches_pipeline is None or command.uncertain:
+        return True, None, True
+
+    if command.basename == "echo":
+        return _static_echo_output(command)
+    if command.basename == "printf":
+        return _static_printf_output(command)
+    if command.basename == "cat" and not command.arguments:
+        has_source, source, uncertain = _static_standard_input_source(
+            syntax,
+            enclosing_node=enclosing_node,
+        )
+        if has_source:
+            return has_source, source, uncertain
+    return True, None, True
+
+
+def static_piped_shell_source(
+    syntax: ShellCommand,
+    command: CommandSemantics,
+    pipeline_source: tuple[bool, str | None, bool],
+    enclosing_node: Node,
+) -> tuple[bool, str | None, bool]:
+    """Return pipeline input that a shell runner executes as source."""
+    if not pipeline_source[0]:
+        return False, None, False
+
+    runner_command = _without_redirect_descriptor_words(syntax, command)
+    has_script, _, script_uncertain = static_shell_script(runner_command)
+    if has_script:
+        return False, None, False
+    if script_uncertain:
+        return True, None, True
+    if not is_shell_runner(runner_command):
+        return False, None, False
+
+    reads_standard_input = _runner_reads_standard_input(runner_command)
+    if reads_standard_input is False:
+        return False, None, False
+
+    has_source, source, source_uncertain = static_standard_input_source(
+        syntax,
+        pipeline_source,
+        enclosing_node,
+    )
+    if not has_source:
+        return False, None, False
+    if reads_standard_input is None or source_uncertain:
+        return True, None, True
+    return True, source, False
+
+
+def static_standard_input_source(
+    syntax: ShellCommand,
+    initial_source: tuple[bool, str | None, bool],
+    enclosing_node: Node,
+) -> tuple[bool, str | None, bool]:
+    """Return the standard-input source after applying command redirects."""
+    return _static_standard_input_source(
+        syntax,
+        initial_source,
+        enclosing_node,
+    )
+
+
+def _static_echo_output(
+    command: CommandSemantics,
+) -> tuple[bool, str | None, bool]:
+    if any(
+        argument is None
+        or argument_arity_is_uncertain(argument, word)
+        or "\\" in argument
+        for argument, word in zip(
+            command.arguments,
+            command.argument_words,
+            strict=True,
+        )
+    ):
+        return True, None, True
+    arguments = [argument for argument in command.arguments if argument is not None]
+    if arguments and arguments[0].startswith("-"):
+        return True, None, True
+    return True, " ".join(arguments) + "\n", False
+
+
+def _static_printf_output(
+    command: CommandSemantics,
+) -> tuple[bool, str | None, bool]:
+    if not command.arguments:
+        return True, "", False
+    format_index = 1 if command.arguments[0] == _END_OF_OPTIONS else 0
+    if format_index >= len(command.arguments):
+        return True, "", False
+    format_string = command.arguments[format_index]
+    if format_string is None or argument_arity_is_uncertain(
+        format_string,
+        command.argument_words[format_index],
+    ):
+        return True, None, True
+    if format_index == 0 and format_string.startswith("-"):
+        return True, None, True
+    if "\\" in format_string:
+        return True, None, True
+    values = [
+        (
+            argument
+            if argument is not None and not argument_arity_is_uncertain(argument, word)
+            else None
+        )
+        for argument, word in zip(
+            command.arguments[format_index + 1 :],
+            command.argument_words[format_index + 1 :],
+            strict=True,
+        )
+    ]
+    output = _render_simple_printf(format_string, values)
+    return True, output, output is None
+
+
+def _render_simple_printf(
+    format_string: str,
+    values: list[str | None],
+) -> str | None:
+    output: list[str] = []
+    value_index = 0
+    consumes_values = False
+    index = 0
+    while index < len(format_string):
+        if format_string[index] != "%":
+            output.append(format_string[index])
+            index += 1
+            continue
+        if index + 1 >= len(format_string):
+            return None
+        conversion = format_string[index + 1]
+        if conversion == "%":
+            output.append("%")
+        elif conversion == "s" and value_index < len(values):
+            value = values[value_index]
+            if value is None:
+                return None
+            consumes_values = True
+            output.append(value)
+            value_index += 1
+        else:
+            return None
+        index += 2
+    if consumes_values and value_index != len(values):
+        return None
+    return "".join(output)
+
+
+def standard_output_reaches_pipeline(
+    command: ShellCommand,
+    enclosing_node: Node | None = None,
+) -> bool | None:
     """Return whether the command's standard output still reaches its pipe."""
     pipe_output: dict[str, bool | None] = {"1": True, "2": False}
-    for redirect, descriptor in _command_redirects(command):
+    for redirect, descriptor in _command_redirects(command, enclosing_node):
         target_fd = _normalize_descriptor(descriptor)
         redirect_text = _decode(redirect.text).lstrip("0123456789")
         if redirect_text.startswith(("&>", "&>>")):
-            pipe_output["1"] = False
-            pipe_output["2"] = False
+            destination = _redirect_destination(redirect)
+            alias = _file_descriptor_alias(destination)
+            if alias is not None:
+                redirected_output = pipe_output.get(alias, False)
+            else:
+                redirected_output = None if destination is None else False
+            pipe_output["1"] = redirected_output
+            pipe_output["2"] = redirected_output
             continue
         if redirect_text.startswith((">&", "<&")):
             destination = _redirect_destination(redirect)
@@ -362,7 +532,12 @@ def standard_output_reaches_pipeline(command: ShellCommand) -> bool | None:
             else:
                 pipe_output[target_fd] = None
             continue
-        pipe_output[target_fd] = False
+        destination = _redirect_destination(redirect)
+        alias = _file_descriptor_alias(destination)
+        if alias is not None:
+            pipe_output[target_fd] = pipe_output.get(alias, False)
+        else:
+            pipe_output[target_fd] = None if destination is None else False
     return pipe_output["1"]
 
 
@@ -803,12 +978,14 @@ def _runner_reads_standard_input(command: CommandSemantics) -> bool | None:
 
 def _static_standard_input_source(
     command: ShellCommand,
+    initial_source: tuple[bool, str | None, bool] = (False, None, False),
+    enclosing_node: Node | None = None,
 ) -> tuple[bool, str | None, bool]:
-    sources: dict[str, tuple[bool, str | None, bool]] = {}
-    for redirect, descriptor in _command_redirects(command):
+    sources = {"0": initial_source} if initial_source[0] else {}
+    for redirect, descriptor in _command_redirects(command, enclosing_node):
         target_fd = _normalize_descriptor(descriptor)
         redirect_text = _decode(redirect.text).lstrip("0123456789")
-        if redirect_text.startswith("<&"):
+        if redirect_text.startswith(("<&", ">&")):
             destination = _redirect_destination(redirect)
             if destination == "-":
                 sources.pop(target_fd, None)
@@ -823,13 +1000,32 @@ def _static_standard_input_source(
             if target_fd == "0" or sources:
                 sources[target_fd] = (True, None, True)
             continue
+        if redirect_text.startswith(("&>", "&>>")):
+            destination = _redirect_destination(redirect)
+            alias = _file_descriptor_alias(destination)
+            if alias is not None and alias in sources:
+                sources["1"] = sources[alias]
+                sources["2"] = sources[alias]
+            elif destination is None and sources:
+                sources["1"] = (True, None, True)
+                sources["2"] = (True, None, True)
+            else:
+                sources.pop("1", None)
+                sources.pop("2", None)
+            continue
         if _is_herestring_redirect(redirect, redirect_text):
             sources[target_fd] = _static_herestring_source(redirect)
             continue
         if redirect.type == "heredoc_redirect":
             sources[target_fd] = _static_heredoc_source(redirect)
             continue
-        if redirect_text.startswith("<"):
+        destination = _redirect_destination(redirect)
+        alias = _file_descriptor_alias(destination)
+        if alias is not None and alias in sources:
+            sources[target_fd] = sources[alias]
+        elif destination is None and (target_fd == "0" or sources):
+            sources[target_fd] = (True, None, True)
+        else:
             sources.pop(target_fd, None)
     return sources.get("0", (False, None, False))
 
@@ -864,6 +1060,23 @@ def _redirect_destination(redirect: Node) -> str | None:
     for index, child in enumerate(redirect.children):
         if child.is_named and redirect.field_name_for_child(index) == "destination":
             return _resolve_node_literal(child)
+    return None
+
+
+def _file_descriptor_alias(path: str | None) -> str | None:
+    aliases = {
+        "/dev/stdin": "0",
+        "/dev/stdout": "1",
+        "/dev/stderr": "2",
+    }
+    if path in aliases:
+        return aliases[path]
+    if path is None:
+        return None
+    for prefix in ("/dev/fd/", "/proc/self/fd/"):
+        descriptor = path.removeprefix(prefix)
+        if descriptor != path and descriptor.isdecimal():
+            return _normalize_descriptor(descriptor)
     return None
 
 
@@ -946,17 +1159,35 @@ def _is_redirect_descriptor_word(
     return False
 
 
-def _command_redirects(command: ShellCommand) -> list[tuple[Node, str]]:
+def _command_redirects(
+    command: ShellCommand,
+    enclosing_node: Node | None = None,
+) -> list[tuple[Node, str]]:
     redirects: list[tuple[Node, str]] = []
     container = command.node
+    reached_enclosing_node = enclosing_node is None
     while True:
         for child in container.named_children:
-            if "redirect" in child.type:
+            if "redirect" in child.type and child.type != "redirected_statement":
                 _append_redirect_tree(redirects, command, child)
+        if container == enclosing_node:
+            reached_enclosing_node = True
         parent = container.parent
-        if parent is None or parent.type != "redirected_statement":
-            break
-        container = parent
+        if not reached_enclosing_node and parent is not None:
+            container = parent
+            continue
+        if parent is not None and parent.type == "redirected_statement":
+            container = parent
+            continue
+        if (
+            parent is not None
+            and parent.type == "pipeline"
+            and parent.named_children
+            and parent.named_children[-1] == container
+        ):
+            container = parent
+            continue
+        break
 
     parent = command.node.parent
     sibling = parent.next_named_sibling if parent is not None else None
@@ -1008,6 +1239,11 @@ def _redirect_descriptor(command: ShellCommand, redirect: Node) -> str:
     descriptor_length = len(text) - len(text.lstrip("0123456789"))
     if descriptor_length:
         return text[:descriptor_length]
+    previous = redirect.prev_named_sibling
+    if previous is not None and previous.end_byte == redirect.start_byte:
+        fields = (previous.text or b"").rsplit(maxsplit=1)
+        if fields and fields[-1].isdigit():
+            return fields[-1].decode()
     for word in command.words:
         if word.node.end_byte == redirect.start_byte and word.text.isdecimal():
             return word.text
@@ -1115,31 +1351,29 @@ def _sets_script_flag(literal: str) -> bool:
     A single ``-`` or ``+`` prefix starts a short-option group. Repeated
     prefixes do not.
     """
+    return _is_short_option_group(literal) and _SCRIPT_FLAG_CHAR in literal[1:]
+
+
+def _is_short_option_group(literal: str) -> bool:
     return (
         len(literal) > 1
         and literal[0] in _OPTION_PREFIXES
         and literal[1] not in _OPTION_PREFIXES
-        and _SCRIPT_FLAG_CHAR in literal[1:]
     )
 
 
 def _sets_stdin_flag(literal: str) -> bool:
-    return (
-        len(literal) > 1
-        and literal[0] == "-"
-        and literal[1] != "-"
-        and "s" in literal[1:]
-    )
+    return _is_short_option_group(literal) and literal[0] == "-" and "s" in literal[1:]
 
 
 def _updated_noexec(current: bool, literal: str) -> bool:
-    if "n" not in literal[1:]:
+    if not _is_short_option_group(literal) or "n" not in literal[1:]:
         return current
     return literal.startswith("-")
 
 
 def _sets_dump_strings(basename: str | None, literal: str) -> bool:
-    return basename == "bash" and "D" in literal[1:]
+    return basename == "bash" and _is_short_option_group(literal) and "D" in literal[1:]
 
 
 def _runner_option_value_count(literal: str, basename: str | None) -> int | None:
@@ -1152,6 +1386,8 @@ def _runner_option_value_count(literal: str, basename: str | None) -> int | None
     if literal.startswith(_END_OF_OPTIONS):
         return None
     flags = literal[1:]
+    if basename != "bash" and "D" in flags:
+        return None
     if any(flag not in _SHORT_RUNNER_OPTIONS for flag in flags):
         return None
     if any(flag in _SHORT_OPTS_WITH_ARG for flag in flags[:-1]):
