@@ -4,12 +4,13 @@ Some threats are structural, not lexical: ``curl ... | command`` is
 dangerous because of the *combination* of fetch + pipeline consumer, not
 because either token is dangerous alone. Rails express these composed
 conditions as deterministic rules evaluated per-segment, so that
-tokens from different fields (thought vs. tool arguments) cannot
+tokens from different executable fields cannot
 accidentally satisfy a composed condition.
 
 v1 ships three rails: fetch-to-exec, raw-disk-op, catastrophic-delete.
-Each rail maps to ``SecurityRisk.HIGH`` at the SDK boundary. The
-confirmation policy decides whether to prompt the user.
+A matching rail maps to ``SecurityRisk.HIGH`` at the SDK boundary. Relevant
+unresolved shell structure maps to ``SecurityRisk.UNKNOWN``. The confirmation
+policy decides whether to prompt the user.
 """
 
 from __future__ import annotations
@@ -142,10 +143,10 @@ class _RailSignals:
 def _evaluate_rail_segments(segments: list[str]) -> RailDecision:
     """Evaluate deterministic policy rails against per-segment content.
 
-    Per-segment evaluation prevents cross-field false positives: composed
-    conditions like "curl + pipeline consumer" require both commands in the same
-    segment. An agent whose thought mentions "curl" and whose tool call
-    runs "ls" would falsely trigger a flat-string check.
+    Per-segment evaluation prevents cross-field false positives. Fetch-to-exec
+    requires fetch output to reach a consumer in one pipeline inside one
+    executable segment. Text from separate executable fields cannot form one
+    match.
     """
     uncertain: RailDecision | None = None
     for seg in segments:

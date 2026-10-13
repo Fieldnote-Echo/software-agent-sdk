@@ -579,11 +579,8 @@ def _collect_literal_flags(arguments: tuple[str | None, ...]) -> set[str]:
     ``rm``. Resolving the verb but not its options is the asymmetry that made
     that bypass possible.
 
-    A word that is dynamic (command substitution, expansion, ANSI-C string)
-    stays unresolved and contributes no flags. That matches how an
-    unresolvable script operand is treated in ``static_shell_script()``:
-    passing flags through a variable is ordinary benign usage, and flagging it
-    would flood the ensemble with UNKNOWNs.
+    Unresolved words do not add literal flags. A separate check marks them
+    uncertain when they can expand to recursive and force flags.
 
     The end-of-options marker terminates flag parsing, and it is compared
     against the de-quoted literal too -- after ``rm "--"`` the shell really
@@ -1022,7 +1019,7 @@ def _extract_script_operand(
     argument_words: tuple[ShellWord, ...],
     basename: str,
 ) -> tuple[bool, str | None, bool]:
-    """Locate the runner script operand using POSIX argv option semantics.
+    """Locate the runner script operand with the supported shell option rules.
 
     Short options combine, so the script flag counts at any position in a
     group (``-xc``, ``-cx``). A supported argument-taking option consumes the
