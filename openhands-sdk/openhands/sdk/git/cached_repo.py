@@ -412,6 +412,7 @@ def try_cached_clone_or_update(
     update: bool = True,
     git_helper: GitHelper | None = None,
     lock_timeout: float = DEFAULT_LOCK_TIMEOUT,
+    strict: bool = False,
     *,
     require_requested_ref: bool = False,
 ) -> Path | None:
@@ -425,8 +426,9 @@ def try_cached_clone_or_update(
         - If repo exists and update=False with ref: checkout ref without fetching
         - If repo exists and update=False without ref: use as-is
 
-    The update sequence is: fetch origin -> checkout ref -> reset --hard origin/ref.
-    This ensures local changes are discarded and the cache matches the remote.
+    Mutable refs normally use this update sequence: fetch origin, check out the
+    ref, and reset the branch to its remote ref. Cached tags and commits can skip
+    the fetch because they are immutable.
 
     Concurrency:
         Uses file-based locking to prevent race conditions when multiple processes
@@ -440,6 +442,9 @@ def try_cached_clone_or_update(
         update: If True and repo exists, fetch and update it. If False, skip fetch.
         git_helper: GitHelper instance for git operations. If None, creates one.
         lock_timeout: Timeout in seconds for acquiring the lock. Default is 5 minutes.
+        strict: If True, an update whose fetch (or checkout of ``ref`` after the
+            fetch) fails returns None instead of the stale cached repository.
+            The cached repository is left on disk either way.
         require_requested_ref: Return None instead of using another cached checkout
             when the requested ref cannot be checked out.
 
@@ -464,6 +469,7 @@ def try_cached_clone_or_update(
                 ref,
                 update,
                 git,
+                strict=strict,
                 require_requested_ref=require_requested_ref,
             )
     except Timeout:
@@ -485,6 +491,7 @@ def _do_clone_or_update(
     ref: str | None,
     update: bool,
     git: GitHelper,
+    strict: bool = False,
     *,
     require_requested_ref: bool = False,
 ) -> Path:
@@ -496,6 +503,7 @@ def _do_clone_or_update(
         ref: Branch, tag, or commit to checkout.
         update: Whether to update existing repos.
         git: GitHelper instance.
+        strict: Whether a failed update raises instead of keeping the cache.
         require_requested_ref: Whether failure to check out a requested ref should
             fail the operation instead of falling back to another cached checkout.
 
@@ -512,6 +520,7 @@ def _do_clone_or_update(
                 repo_path,
                 ref,
                 git,
+                strict=strict,
                 require_requested_ref=require_requested_ref,
             )
         elif ref:
@@ -563,6 +572,7 @@ def _update_repository(
     repo_path: Path,
     ref: str | None,
     git: GitHelper,
+    strict: bool = False,
     *,
     require_requested_ref: bool = False,
 ) -> None:
@@ -576,8 +586,10 @@ def _update_repository(
 
     If the local checkout fails (ref not yet cached) or lands on a branch (needs
     the remote's latest), falls through to the requested fetch → checkout → reset
-    cycle. On any failure, logs a warning and returns silently so the cached
-    repository remains usable.
+    cycle. The default policy logs a warning and keeps a usable cached checkout
+    after an update failure. ``strict`` propagates update failures.
+    ``require_requested_ref`` propagates failures that prevent the requested ref
+    from resolving, but it keeps a cached matching ref when only its refresh fails.
 
     Behavior by scenario:
         1. ref locally present and immutable (detached HEAD): local checkout only.
@@ -591,6 +603,8 @@ def _update_repository(
         ref: Branch, tag, or commit to update to. If None, uses current branch
             or falls back to the remote's default branch.
         git: GitHelper instance.
+        strict: If True, a failed fetch, or a failed checkout of ``ref`` after
+            the fetch, raises ``GitCommandError`` instead of keeping the cache.
         require_requested_ref: Raise when a requested ref cannot be checked out
             instead of leaving the repository on another cached checkout.
     """
@@ -614,32 +628,44 @@ def _update_repository(
         assert ref is not None
         if ref_missing_locally:
             git.fetch_requested_ref(repo_path, ref)
+        elif strict:
+            git.fetch_requested_ref(repo_path, ref)
         elif not _try_fetch_requested_ref(repo_path, ref, git):
             return
-    elif ref and not _try_fetch(repo_path, git):
-        return
+    elif ref:
+        if strict:
+            git.fetch(repo_path)
+        elif not _try_fetch(repo_path, git):
+            return
 
     # If a specific ref was requested, check it out
     if ref:
         if require_requested_ref:
             _checkout_requested_ref(repo_path, ref, git)
+        elif strict:
+            _checkout_ref(repo_path, ref, git)
         else:
             _try_checkout_and_reset(repo_path, ref, git)
         return
 
     # No ref specified - update based on current state
-    if not _try_fetch(repo_path, git):
+    if strict:
+        git.fetch(repo_path)
+    elif not _try_fetch(repo_path, git):
         return
     current_branch = git.get_current_branch(repo_path)
 
     if current_branch:
         branch_ref = f"{_HEAD_REF_PREFIX}{current_branch}"
         if git.needs_explicit_branch_fetch(repo_path, current_branch):
-            if not _try_fetch_requested_ref(
-                repo_path,
-                branch_ref,
-                git,
-                follow_tags=True,
+            if strict:
+                git.fetch_requested_ref(
+                    repo_path,
+                    branch_ref,
+                    follow_tags=True,
+                )
+            elif not _try_fetch_requested_ref(
+                repo_path, branch_ref, git, follow_tags=True
             ):
                 return
         _try_reset_to_origin(repo_path, current_branch, git)
