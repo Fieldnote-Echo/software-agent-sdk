@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 import shutil
 from pathlib import Path
+from typing import Final
 
 from filelock import FileLock, Timeout
 
@@ -29,17 +30,8 @@ DEFAULT_LOCK_TIMEOUT = 30
 
 # Matches a full 40-character git commit SHA (lowercase hex)
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-_HEAD_REF_PREFIX = "refs/heads/"
-_TAG_REF_PREFIX = "refs/tags/"
-
-
-def _checkout_error(ref: str, error: GitCommandError) -> GitCommandError:
-    return GitCommandError(
-        message=f"git checkout failed: {error}",
-        command=["git", "checkout", redact_url_credentials_in_text(ref)],
-        exit_code=error.exit_code,
-        stderr=error.stderr,
-    )
+_HEAD_REF_PREFIX: Final[str] = "refs/heads/"
+_TAG_REF_PREFIX: Final[str] = "refs/tags/"
 
 
 def _match_ref_pattern(pattern: str, ref: str) -> str | None:
@@ -287,24 +279,20 @@ class GitHelper:
             )
         except GitCommandError as e:
             if e.exit_code == -1 or _FULL_SHA_RE.fullmatch(ref) or branch is None:
-                raise _checkout_error(ref, e) from e
-            assert branch is not None
+                raise
             remote_ref = f"refs/remotes/origin/{branch}"
-            try:
-                resolved_remote_ref = run_git_command(
-                    [
-                        "git",
-                        "rev-parse",
-                        "--verify",
-                        "--end-of-options",
-                        f"{remote_ref}^{{commit}}",
-                    ],
-                    cwd=repo_path,
-                    timeout=timeout,
-                    expected_failure=True,
-                )
-            except GitCommandError as remote_error:
-                raise _checkout_error(ref, remote_error) from remote_error
+            resolved_remote_ref = run_git_command(
+                [
+                    "git",
+                    "rev-parse",
+                    "--verify",
+                    "--end-of-options",
+                    f"{remote_ref}^{{commit}}",
+                ],
+                cwd=repo_path,
+                timeout=timeout,
+                expected_failure=True,
+            )
             checkout_args = (
                 ["--detach", resolved_remote_ref]
                 if branch.startswith("-")

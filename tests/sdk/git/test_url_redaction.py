@@ -302,15 +302,10 @@ class TestRunGitCommandCredentialRedaction:
 
     def test_checkout_error_redacts_embedded_url(self):
         ref = f"topic/{CREDENTIAL_URL}"
-        error = GitCommandError(
-            "invalid ref",
-            command=["git", "rev-parse", ref],
-            exit_code=1,
+        completed = subprocess.CompletedProcess(
+            args=["git"], returncode=1, stdout="", stderr="invalid ref"
         )
-        with patch(
-            "openhands.sdk.git.cached_repo.run_git_command",
-            side_effect=error,
-        ):
+        with patch("subprocess.run", return_value=completed):
             with pytest.raises(GitCommandError) as exc_info:
                 GitHelper().checkout_requested_ref(Path("/repo"), ref)
         assert all("SUPERSECRET" not in arg for arg in exc_info.value.command)
