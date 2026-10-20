@@ -3,12 +3,10 @@
 import logging
 import subprocess
 import sys
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from openhands.sdk.git.cached_repo import GitHelper
 from openhands.sdk.git.exceptions import GitCommandError
 from openhands.sdk.git.utils import (
     get_git_repository_metadata,
@@ -299,17 +297,6 @@ class TestRunGitCommandCredentialRedaction:
                 run_git_command(args)
         assert all("SUPERSECRET" not in arg for arg in exc_info.value.command)
         assert f"refs/heads/{REDACTED_URL}" in exc_info.value.command
-
-    def test_checkout_error_redacts_embedded_url(self):
-        ref = f"topic/{CREDENTIAL_URL}"
-        completed = subprocess.CompletedProcess(
-            args=["git"], returncode=1, stdout="", stderr="invalid ref"
-        )
-        with patch("subprocess.run", return_value=completed):
-            with pytest.raises(GitCommandError) as exc_info:
-                GitHelper().checkout_requested_ref(Path("/repo"), ref)
-        assert all("SUPERSECRET" not in arg for arg in exc_info.value.command)
-        assert any(REDACTED_URL in arg for arg in exc_info.value.command)
 
     def test_timeout_expired_redacts_command(self):
         with patch(

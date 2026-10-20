@@ -1,4 +1,5 @@
 import shutil
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -191,30 +192,44 @@ def test_install_with_force_overwrites(
     assert not marker_file.exists()
 
 
-def test_failed_force_install_preserves_files_and_metadata(
+def test_failed_force_git_install_preserves_files_and_metadata(
     manager: InstallationManager[MockExtension],
-    mock_extension_dir: Path,
     installation_dir: Path,
     mock_extension: MockExtension,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
-    manager.install(mock_extension_dir)
-    marker_file = installation_dir / mock_extension.name / "marker.txt"
+    source = _write_mock_extension(tmp_path / "source")
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=source, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"],
+        cwd=source,
+        check=True,
+    )
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=source, check=True)
+    subprocess.run(["git", "config", "commit.gpgSign", "false"], cwd=source, check=True)
+    subprocess.run(["git", "add", "."], cwd=source, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=source, check=True)
+    monkeypatch.setattr(
+        "openhands.sdk.extensions.installation.manager.DEFAULT_CACHE_DIR",
+        tmp_path / "cache",
+    )
+    source_url = f"file://{source}"
+    manager.install(source_url)
+
+    installed_dir = installation_dir / mock_extension.name
+    manifest_path = installed_dir / "extension.json"
+    manifest_before = manifest_path.read_bytes()
+    marker_file = installed_dir / "marker.txt"
     marker_file.write_text("original")
     metadata_path = installation_dir / ".installed.json"
     metadata_before = metadata_path.read_bytes()
 
-    with patch(
-        "openhands.sdk.extensions.installation.manager.fetch_with_resolution",
-        side_effect=ExtensionFetchError("unknown ref"),
-    ):
-        with pytest.raises(ExtensionFetchError, match="unknown ref"):
-            manager.install(
-                source="github:org/repo",
-                ref="missing-ref",
-                force=True,
-            )
+    with pytest.raises(ExtensionFetchError, match="Failed to fetch extension"):
+        manager.install(source=source_url, ref="missing-ref", force=True)
 
     assert marker_file.read_text() == "original"
+    assert manifest_path.read_bytes() == manifest_before
     assert metadata_path.read_bytes() == metadata_before
 
 
