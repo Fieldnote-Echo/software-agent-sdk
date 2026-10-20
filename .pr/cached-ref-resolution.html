@@ -145,7 +145,7 @@
 
     <section id="risk">
       <h2><span class="num">3</span>Risk and review scope</h2>
-      <div class="callout warn"><strong>⚠ Bounded limitation:</strong> A restrictive Git protocol-v0 server can reject an older commit ID that exists only on a non-default branch. This PR does not use an unbounded full-history fetch to work around that server limit.</div>
+      <div class="callout warn"><strong>⚠ Compatibility fallback:</strong> A restrictive Git protocol-v0 server can reject a direct request for an unadvertised commit ID. If the configured fetch still cannot resolve it, the resolver fetches all remote branch and tag history, then verifies the requested commit ID.</div>
       <ul>
         <li>Remote absence must not become an offline fallback.</li>
         <li>A symbolic cached ref must not satisfy an exact identity check.</li>

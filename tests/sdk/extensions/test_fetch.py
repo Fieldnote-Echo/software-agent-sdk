@@ -580,6 +580,30 @@ def test_fetch_sha_falls_back_to_configured_refspec(
     )
 
 
+def test_fetch_sha_from_uncached_source_with_protocol_v0(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    source, refs = _create_git_source(tmp_path)
+    requested_sha = refs["feature"]
+    subprocess.run(["git", "switch", "-q", "feature"], cwd=source, check=True)
+    _commit_version(source, "feature-v3")
+    subprocess.run(["git", "switch", "-q", "main"], cwd=source, check=True)
+    source_url = f"file://{source}"
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "protocol.version")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "0")
+
+    result, resolved_ref = fetch_with_resolution(
+        source_url,
+        cache_dir=tmp_path / "cache",
+        ref=requested_sha,
+    )
+
+    assert (result / "version.txt").read_text() == "v2"
+    assert resolved_ref == requested_sha
+
+
 def test_fetch_rejects_deleted_remote_branch(tmp_path: Path):
     source, _ = _create_git_source(tmp_path)
     source_url = f"file://{source}"

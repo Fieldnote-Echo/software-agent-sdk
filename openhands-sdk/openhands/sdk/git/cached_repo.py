@@ -565,6 +565,9 @@ class GitHelper:
             self.fetch(repo_path, timeout=timeout)
             resolved = self._try_resolve_object_id(repo_path, ref, timeout)
             if resolved is None:
+                self._fetch_all_remote_history(repo_path, timeout)
+                resolved = self._try_resolve_object_id(repo_path, ref, timeout)
+            if resolved is None:
                 raise GitCommandError(
                     "Fetched object does not match the requested ID",
                     command=["git", "fetch", "origin", ref],
@@ -580,6 +583,25 @@ class GitHelper:
                 exit_code=1,
             )
         return resolved
+
+    def _fetch_all_remote_history(self, repo_path: Path, timeout: int) -> None:
+        """Fetch all remote branch and tag history."""
+        command = ["git", "fetch"]
+        if self._is_shallow(repo_path, timeout):
+            command.append("--unshallow")
+        command.extend(
+            [
+                "origin",
+                f"+{_HEAD_REF_PREFIX}*:{_REMOTE_REF_PREFIX}*",
+                f"+{_TAG_REF_PREFIX}*:{_TAG_REF_PREFIX}*",
+            ]
+        )
+        run_git_command(
+            command,
+            cwd=repo_path,
+            timeout=timeout,
+            expected_failure=True,
+        )
 
     def _resolve_commit(
         self,
